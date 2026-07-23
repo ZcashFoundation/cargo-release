@@ -1,5 +1,5 @@
-name: Resumable Cargo Release
-description: Safely resume partial Cargo workspace releases to crates.io and GitHub
+name: Cargo Release
+description: Resumable Cargo workspace publishing for crates.io and GitHub
 author: Zcash Foundation
 branding:
   icon: refresh-cw
@@ -22,7 +22,7 @@ inputs:
   config-path:
     description: Release policy path relative to the current workflow checkout
     required: false
-    default: .github/resumable-cargo-release.yml
+    default: .github/cargo-release.yml
   github-token:
     description: Token used to observe tags and GitHub Releases in every phase
     required: true

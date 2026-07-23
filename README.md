@@ -1,23 +1,24 @@
-# Resumable Cargo Release
+# Cargo Release
 
-[![CI](https://github.com/ZcashFoundation/resumable-cargo-release/actions/workflows/ci.yml/badge.svg)](https://github.com/ZcashFoundation/resumable-cargo-release/actions/workflows/ci.yml)
+[![CI](https://github.com/ZcashFoundation/cargo-release/actions/workflows/ci.yml/badge.svg)](https://github.com/ZcashFoundation/cargo-release/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Safely publish a Cargo workspace even when an earlier release stopped halfway.
+Cargo Release is a GitHub Action for resumable Cargo workspace publishing to
+crates.io and GitHub Releases.
 
 Cargo 1.90 added native multi-package publishing, but a workspace publication
 is still non-atomic. One failed upload can leave some versions on crates.io,
 and retrying the original package set can then collide with versions that
-already exist. Resumable Cargo Release derives the intended release from 2
-immutable commits, verifies crates.io and GitHub state, and creates only what is
-still missing.
+already exist. Cargo Release derives the intended release from 2 immutable
+commits, verifies crates.io and GitHub state, and creates only what is still
+missing.
 
 This action is not specific to Zebra. It works with a single Rust package or a
 Cargo workspace in any GitHub repository that publishes to crates.io.
 
 ## Is this action a fit?
 
-Use Resumable Cargo Release when:
+Use Cargo Release when:
 
 - an approved commit already contains the versions that should be released;
 - the source is hosted on GitHub, and packages publish to crates.io;
@@ -27,10 +28,10 @@ Use Resumable Cargo Release when:
 - tags and an optional GitHub Release should appear only after every crate is
   available.
 
-For a single crate, `cargo publish` may be sufficient. This action adds the most
-value when a workspace has several publishable crates, a release must survive
-reruns, or a server needs a verification gate between crate publication and its
-public tag or GitHub Release.
+For a single crate, `cargo publish` may be sufficient. Cargo Release adds the
+most value to workspaces with several publishable crates, particularly when
+releases must survive reruns or a server needs a verification gate before
+public tags and GitHub Releases.
 
 Current scope:
 
@@ -44,21 +45,21 @@ Other Git forges and Cargo registries are not supported.
 
 ## Where it fits
 
-Resumable Cargo Release owns the post-merge publication and recovery boundary.
-It composes with existing release tools instead of replacing them.
+Cargo Release owns the post-merge publication and recovery boundary. It
+composes with existing release tools instead of replacing them.
 
 | Tool                                                                        | Responsibility                                                                                                                                   |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | [release-plz](https://github.com/release-plz/release-plz)                   | Update versions and changelogs, then prepare the Release PR. Its `release` command remains a simpler option when phased recovery is unnecessary. |
-| Resumable Cargo Release                                                     | Reconstruct the approved release, verify existing crates, publish the missing set with native Cargo, then reconcile tags and release metadata.   |
+| Cargo Release                                                               | Reconstruct the approved release, verify existing crates, publish the missing set with native Cargo, then reconcile tags and release metadata.   |
+| [cargo-release CLI](https://github.com/crate-ci/cargo-release)              | Prepare and execute Cargo releases from a local or CI command. This action does not invoke or wrap the CLI.                                      |
 | [crates-io-auth-action](https://github.com/rust-lang/crates-io-auth-action) | Supply a short-lived crates.io token through trusted publishing.                                                                                 |
 | [dist](https://github.com/axodotdev/cargo-dist)                             | Build and distribute binaries or installers after the source release is complete.                                                                |
 
 [publish-crates](https://github.com/katyo/publish-crates) is a useful alternative
 that implements its own workspace dependency checks and publication ordering.
-Resumable Cargo Release instead delegates multi-package ordering to Cargo 1.90
-or newer, then concentrates on commit provenance, rerun safety, and GitHub
-finalization.
+Cargo Release instead delegates multi-package ordering to Cargo 1.90 or newer,
+then concentrates on commit provenance, rerun safety, and GitHub finalization.
 
 ## How it works
 
@@ -87,7 +88,7 @@ be repaired, but contradictory immutable state stops the run.
 
 ### 1. Add release policy
 
-Create `.github/resumable-cargo-release.yml` in the consuming repository:
+Create `.github/cargo-release.yml` in the consuming repository:
 
 ```yaml
 tagTemplate: "{name}-v{version}"
@@ -171,7 +172,7 @@ jobs:
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
 
       - name: Publish and finalize release
-        uses: ZcashFoundation/resumable-cargo-release@<full-commit-sha>
+        uses: ZcashFoundation/cargo-release@<full-commit-sha>
         with:
           phase: all
           base-sha: ${{ inputs.base_sha }}
@@ -208,7 +209,7 @@ finalization around that repository-owned check:
 
 ```yaml
 - name: Publish missing crates
-  uses: ZcashFoundation/resumable-cargo-release@<full-commit-sha>
+  uses: ZcashFoundation/cargo-release@<full-commit-sha>
   with:
     phase: publish
     base-sha: ${{ inputs.base_sha }}
@@ -221,7 +222,7 @@ finalization around that repository-owned check:
   run: cargo install --locked example-server --version "${{ inputs.version }}"
 
 - name: Finalize tags and GitHub Release
-  uses: ZcashFoundation/resumable-cargo-release@<full-commit-sha>
+  uses: ZcashFoundation/cargo-release@<full-commit-sha>
   with:
     phase: finalize
     base-sha: ${{ inputs.base_sha }}
@@ -276,15 +277,15 @@ cannot set `makeLatest` to `true`.
 
 ## Inputs and outputs
 
-| Input              | Required | Default                               | Description                                                |
-| ------------------ | -------- | ------------------------------------- | ---------------------------------------------------------- |
-| `phase`            | No       | `all`                                 | `check`, `publish`, `finalize`, or `all`.                  |
-| `source-directory` | No       | `.`                                   | Cargo workspace within the target checkout.                |
-| `base-sha`         | Yes      |                                       | Full commit SHA before the approved release change.        |
-| `target-sha`       | Yes      |                                       | Full approved release commit SHA.                          |
-| `config-path`      | No       | `.github/resumable-cargo-release.yml` | Policy path relative to the workflow checkout.             |
-| `github-token`     | Yes      |                                       | Token used to observe tags and releases in every phase.    |
-| `attempts`         | No       | `3`                                   | Registry observations after one Cargo publication attempt. |
+| Input              | Required | Default                     | Description                                                |
+| ------------------ | -------- | --------------------------- | ---------------------------------------------------------- |
+| `phase`            | No       | `all`                       | `check`, `publish`, `finalize`, or `all`.                  |
+| `source-directory` | No       | `.`                         | Cargo workspace within the target checkout.                |
+| `base-sha`         | Yes      |                             | Full commit SHA before the approved release change.        |
+| `target-sha`       | Yes      |                             | Full approved release commit SHA.                          |
+| `config-path`      | No       | `.github/cargo-release.yml` | Policy path relative to the workflow checkout.             |
+| `github-token`     | Yes      |                             | Token used to observe tags and releases in every phase.    |
+| `attempts`         | No       | `3`                         | Registry observations after one Cargo publication attempt. |
 
 The `plan` output contains the deterministic release plan as JSON. The `report`
 output contains observations for the selected phase. A `complete` report from

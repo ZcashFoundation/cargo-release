@@ -40,7 +40,7 @@ async function run(): Promise<void> {
   const baseSha = core.getInput("base-sha", { required: true });
   const targetSha = core.getInput("target-sha", { required: true });
   const configPath =
-    core.getInput("config-path") || ".github/resumable-cargo-release.yml";
+    core.getInput("config-path") || ".github/cargo-release.yml";
   const githubToken = core.getInput("github-token", { required: true });
   core.setSecret(githubToken);
 
@@ -153,7 +153,7 @@ function workspacePlanPorts(): WorkspacePlanPorts {
       return readFile(file, "utf8");
     },
     async makeTempDirectory() {
-      return mkdtemp(path.join(tmpdir(), "resumable-cargo-release-"));
+      return mkdtemp(path.join(tmpdir(), "cargo-release-"));
     },
     async removeDirectory(directory) {
       await rm(directory, { recursive: true, force: true });
@@ -296,7 +296,7 @@ function parseAttempts(value: string): number {
 
 const cratesIoFetch: typeof globalThis.fetch = (input, init) => {
   const headers = new Headers(init?.headers);
-  headers.set("User-Agent", "ZcashFoundation/resumable-cargo-release");
+  headers.set("User-Agent", "ZcashFoundation/cargo-release");
   return globalThis.fetch(input, { ...init, headers });
 };
 

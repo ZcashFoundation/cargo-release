@@ -174,7 +174,7 @@ test("assembles a side-effect-free check and succeeds for incomplete state", asy
       sourceDirectory: expect.stringMatching(/release-source$/),
       baseSha: plan.source.baseSha,
       targetSha: plan.source.targetSha,
-      configPath: ".github/resumable-cargo-release.yml",
+      configPath: ".github/cargo-release.yml",
     },
     expect.any(Object),
   );

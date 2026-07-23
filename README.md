@@ -76,7 +76,7 @@ uninterrupted command.
 ## What Cargo solved, and what remained
 
 The release workflow that motivated this action used
-[release-plz 0.3.159](https://github.com/release-plz/release-plz/tree/e824efb05783b2410653757cb7659f5b22dab3c7).
+[release-plz 0.3.160](https://github.com/release-plz/release-plz/tree/7e38e7a93dff31bbf6312400f79b9de36e8d3834).
 These claims are scoped to that exact version rather than current upstream
 development. Its release command iterates over packages and runs one
 `cargo publish` command for each crate. During a dry run, an `app` crate
@@ -113,10 +113,10 @@ GitHub Release last.
 <details>
 <summary>Exact source behavior behind the design</summary>
 
-- release-plz 0.3.159
-  [loops over publishable packages](https://github.com/release-plz/release-plz/blob/e824efb05783b2410653757cb7659f5b22dab3c7/crates/release_plz_core/src/command/release.rs#L579-L617),
-  [returns when a tag already exists](https://github.com/release-plz/release-plz/blob/e824efb05783b2410653757cb7659f5b22dab3c7/crates/release_plz_core/src/command/release.rs#L627-L709),
-  and [builds one `cargo publish --package` command per crate](https://github.com/release-plz/release-plz/blob/e824efb05783b2410653757cb7659f5b22dab3c7/crates/release_plz_core/src/command/release.rs#L1154-L1200).
+- release-plz 0.3.160
+  [loops over publishable packages](https://github.com/release-plz/release-plz/blob/7e38e7a93dff31bbf6312400f79b9de36e8d3834/crates/release_plz_core/src/command/release.rs#L579-L617),
+  [returns when a tag already exists](https://github.com/release-plz/release-plz/blob/7e38e7a93dff31bbf6312400f79b9de36e8d3834/crates/release_plz_core/src/command/release.rs#L627-L635),
+  and [builds one `cargo publish --package` command per crate](https://github.com/release-plz/release-plz/blob/7e38e7a93dff31bbf6312400f79b9de36e8d3834/crates/release_plz_core/src/command/release.rs#L1154-L1200).
 - Cargo 1.91
   [builds and executes one dependency-aware publish plan](https://github.com/rust-lang/cargo/blob/ea2d97820c16195b0ca3fadb4319fe512c199a43/src/cargo/ops/registry/publish.rs#L71-L360)
   and [packages interdependent crates against a temporary local registry](https://github.com/rust-lang/cargo/blob/ea2d97820c16195b0ca3fadb4319fe512c199a43/src/cargo/ops/cargo_package/mod.rs#L248-L359).
@@ -232,7 +232,7 @@ jobs:
 
     steps:
       - name: Checkout approved release commit
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.target_sha }}
           fetch-depth: 0

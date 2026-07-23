@@ -22,6 +22,7 @@ import {
   type Observation,
   type Phase,
   type ReconcilePorts,
+  type ReconcileReport,
 } from "./reconcile.js";
 import { loadReleasePlan, type WorkspacePlanPorts } from "./workspace-plan.js";
 
@@ -46,7 +47,7 @@ async function run(): Promise<void> {
   // Cargo can execute package build scripts, which do not need this token.
   delete process.env["INPUT_GITHUB-TOKEN"];
 
-  const plan = await loadReleasePlan(
+  const { plan, githubReleaseError } = await loadReleasePlan(
     {
       controllerDirectory: process.cwd(),
       sourceDirectory,
@@ -57,6 +58,9 @@ async function run(): Promise<void> {
     workspacePlanPorts(),
   );
   core.setOutput("plan", JSON.stringify(plan));
+  if (phase !== "check" && githubReleaseError !== undefined) {
+    throw githubReleaseError;
+  }
 
   const publisher = new CargoPublisher(
     sourceDirectory,
@@ -106,35 +110,62 @@ async function run(): Promise<void> {
     },
   };
 
-  const report = await reconcile(plan, phase, ports, { attempts });
-  core.setOutput("report", JSON.stringify(report));
-  if (report.state === "failed") {
-    if (phase === "check" && report.reason === "incomplete") return;
-
-    const observations: Observation[] = [
-      ...report.packages,
-      ...report.tags,
-      ...(report.githubRelease === undefined ? [] : [report.githubRelease]),
-    ];
-    const details = observations
-      .filter((observation) => observation.state !== "matching")
-      .map(
-        (observation) =>
-          `${observation.subject}: ${
-            observation.state === "missing"
-              ? observation.state
-              : observation.detail
-          }`,
-      )
-      .join("; ");
-    const operation =
-      report.operationError === undefined
-        ? ""
-        : `; operation failed: ${report.operationError}`;
+  let report: ReconcileReport;
+  try {
+    report = await reconcile(plan, phase, ports, { attempts });
+  } catch (error: unknown) {
+    if (githubReleaseError === undefined) throw error;
     throw new Error(
-      `release reconciliation ${report.reason}: ${details}${operation}`,
+      `GitHub Release validation failed: ${githubReleaseError.message}; release reconciliation failed: ${errorMessage(error)}`,
+      { cause: error },
     );
   }
+  core.setOutput("report", JSON.stringify(report));
+  const failures = [
+    ...(githubReleaseError === undefined
+      ? []
+      : [`GitHub Release validation failed: ${githubReleaseError.message}`]),
+    ...reportFailureMessages(report, phase),
+  ];
+  if (failures.length > 0) {
+    throw new Error(failures.join("; "));
+  }
+}
+
+function reportFailureMessages(
+  report: ReconcileReport,
+  phase: Phase,
+): string[] {
+  if (report.state === "complete") return [];
+  if (
+    phase === "check" &&
+    report.reason === "incomplete" &&
+    report.operationError === undefined
+  ) {
+    return [];
+  }
+
+  const observations: Observation[] = [
+    ...report.packages,
+    ...report.tags,
+    ...(report.githubRelease === undefined ? [] : [report.githubRelease]),
+  ];
+  const details = observations
+    .filter((observation) => observation.state !== "matching")
+    .map(
+      (observation) =>
+        `${observation.subject}: ${
+          observation.state === "missing"
+            ? observation.state
+            : observation.detail
+        }`,
+    )
+    .join("; ");
+  const operation =
+    report.operationError === undefined
+      ? ""
+      : `; operation failed: ${report.operationError}`;
+  return [`release reconciliation ${report.reason}: ${details}${operation}`];
 }
 
 function workspacePlanPorts(): WorkspacePlanPorts {

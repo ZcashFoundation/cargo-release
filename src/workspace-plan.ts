@@ -3,6 +3,7 @@ import path from "node:path";
 import { gte as semverGte } from "semver";
 import { parse as parseYaml } from "yaml";
 
+import { asError } from "./errors.js";
 import {
   deriveReleasePlan,
   findGithubReleaseCandidate,
@@ -51,10 +52,15 @@ export interface LoadReleasePlanOptions {
   readonly configPath: string;
 }
 
+export interface LoadReleasePlanResult {
+  readonly plan: ReleasePlan;
+  readonly githubReleaseError?: Error;
+}
+
 export async function loadReleasePlan(
   options: LoadReleasePlanOptions,
   ports: WorkspacePlanPorts,
-): Promise<ReleasePlan> {
+): Promise<LoadReleasePlanResult> {
   validateReleaseSource(options.baseSha, options.targetSha);
 
   const controllerDirectory = path.resolve(options.controllerDirectory);
@@ -167,27 +173,43 @@ export async function loadReleasePlan(
     await ports.removeDirectory(temporaryDirectory);
   }
 
-  const notes = await loadNotes(
-    ports,
-    sourceDirectory,
-    config,
-    baseMetadata,
-    targetMetadata,
-  );
-  const plan = deriveReleasePlan({
+  const packagePlan = deriveReleasePlan({
     baseSha: options.baseSha,
     targetSha: options.targetSha,
     baseMetadata,
     targetMetadata,
-    config,
-    ...(notes === undefined ? {} : { notes }),
+    config: packageOnlyConfig(config),
   });
-  if (plan.packages.length === 0) {
+  if (packagePlan.packages.length === 0) {
     throw new Error(
       "release plan is empty; no publishable workspace package version changed",
     );
   }
-  return plan;
+
+  try {
+    const notes = await loadNotes(
+      ports,
+      sourceDirectory,
+      config,
+      baseMetadata,
+      targetMetadata,
+    );
+    return {
+      plan: deriveReleasePlan({
+        baseSha: options.baseSha,
+        targetSha: options.targetSha,
+        baseMetadata,
+        targetMetadata,
+        config,
+        ...(notes === undefined ? {} : { notes }),
+      }),
+    };
+  } catch (error: unknown) {
+    return {
+      plan: packagePlan,
+      githubReleaseError: asError(error),
+    };
+  }
 }
 
 export function parseReleasePlanConfig(source: string): ReleasePlanConfig {
@@ -375,6 +397,17 @@ function requireNotes(source: string): string {
   if (notes.length === 0)
     throw new Error("GitHub Release notes must be non-empty");
   return notes;
+}
+
+function packageOnlyConfig(config: ReleasePlanConfig): ReleasePlanConfig {
+  return {
+    ...(config.tagTemplate === undefined
+      ? {}
+      : { tagTemplate: config.tagTemplate }),
+    ...(config.packageOverrides === undefined
+      ? {}
+      : { packageOverrides: config.packageOverrides }),
+  };
 }
 
 async function requiredRun(

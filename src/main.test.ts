@@ -19,6 +19,15 @@ const plan: ReleasePlan = {
   ],
 };
 
+const defaultInputs: Readonly<Record<string, string>> = {
+  phase: "check",
+  attempts: "3",
+  "source-directory": "release-source",
+  "base-sha": plan.source.baseSha,
+  "target-sha": plan.source.targetSha,
+  "github-token": "masked-token",
+};
+
 const mocks = vi.hoisted(() => ({
   getInput: vi.fn(),
   setFailed: vi.fn(),
@@ -90,17 +99,13 @@ vi.mock("./reconcile.js", () => ({
 }));
 
 beforeEach(() => {
+  vi.resetModules();
+  vi.clearAllMocks();
   process.env["INPUT_GITHUB-TOKEN"] = "masked-token";
-  const inputs: Record<string, string> = {
-    phase: "check",
-    attempts: "3",
-    "source-directory": "release-source",
-    "base-sha": plan.source.baseSha,
-    "target-sha": plan.source.targetSha,
-    "github-token": "masked-token",
-  };
-  mocks.getInput.mockImplementation((name: string) => inputs[name] ?? "");
-  mocks.loadReleasePlan.mockResolvedValue(plan);
+  mocks.getInput.mockImplementation(
+    (name: string) => defaultInputs[name] ?? "",
+  );
+  mocks.loadReleasePlan.mockResolvedValue({ plan });
   mocks.observeCrateVersion.mockResolvedValue({
     state: "missing",
     subject: "example@1.2.3",
@@ -197,4 +202,56 @@ test("assembles a side-effect-free check and succeeds for incomplete state", asy
     ref: "tags/example-v1.2.3",
     request: { signal: expect.any(AbortSignal) },
   });
+});
+
+test("check dry-runs complete packages before reporting a missing release-notes heading", async () => {
+  const githubReleaseError = new Error(
+    'release notes heading "## [Zebra 1.2.3]" was not found',
+  );
+  const reconcileError = "cargo publish --dry-run failed with exit code 101";
+  mocks.loadReleasePlan.mockResolvedValueOnce({
+    plan,
+    githubReleaseError,
+  });
+  mocks.reconcile.mockImplementationOnce(
+    async (releasePlan: ReleasePlan, phase: string, ports: ReconcilePorts) => {
+      expect(releasePlan).toBe(plan);
+      expect(phase).toBe("check");
+      await ports.dryRunPackages(releasePlan.packages);
+      throw new Error(reconcileError);
+    },
+  );
+
+  await import("./main.js");
+
+  await vi.waitFor(() => expect(mocks.setFailed).toHaveBeenCalledOnce());
+  expect(mocks.dryRun).toHaveBeenCalledExactlyOnceWith(plan.packages);
+  expect(mocks.publish).not.toHaveBeenCalled();
+  const failure = mocks.setFailed.mock.lastCall?.[0];
+  expect(failure).toEqual(expect.stringContaining(githubReleaseError.message));
+  expect(failure).toEqual(expect.stringContaining(reconcileError));
+});
+
+test("publish fails before reconciliation when GitHub Release validation fails", async () => {
+  const githubReleaseError = new Error(
+    'release notes heading "## [Zebra 1.2.3]" was not found',
+  );
+  mocks.getInput.mockImplementation((name: string) =>
+    name === "phase" ? "publish" : (defaultInputs[name] ?? ""),
+  );
+  mocks.loadReleasePlan.mockResolvedValueOnce({
+    plan,
+    githubReleaseError,
+  });
+
+  await import("./main.js");
+
+  await vi.waitFor(() =>
+    expect(mocks.setFailed).toHaveBeenCalledExactlyOnceWith(
+      githubReleaseError.message,
+    ),
+  );
+  expect(mocks.reconcile).not.toHaveBeenCalled();
+  expect(mocks.dryRun).not.toHaveBeenCalled();
+  expect(mocks.publish).not.toHaveBeenCalled();
 });

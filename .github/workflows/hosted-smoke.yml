@@ -83,8 +83,9 @@ jobs:
           }
           EOF
 
+          printf '# Changelog\n' > CHANGELOG.md
           cargo generate-lockfile
-          git add Cargo.lock Cargo.toml core client
+          git add CHANGELOG.md Cargo.lock Cargo.toml core client
           git commit -m "Create smoke workspace"
           base_sha="$(git rev-parse HEAD)"
 
@@ -102,6 +103,12 @@ jobs:
             printf 'CLIENT_NAME=%s\n' "${client_name}"
           } >> "${GITHUB_ENV}"
           printf '%s\n' '{}' > "${GITHUB_WORKSPACE}/.github/cargo-release-hosted-smoke.yml"
+          cat > "${GITHUB_WORKSPACE}/.github/cargo-release-invalid-notes.yml" <<EOF
+          githubRelease:
+            package: ${client_name}
+            notesFile: CHANGELOG.md
+            notesHeadingTemplate: "## Release {version}"
+          EOF
 
       - name: Run the committed action in check mode
         id: release
@@ -152,4 +159,40 @@ jobs:
 
           assertMissing(report.packages, expectedPackages, "package");
           assertMissing(report.tags, expectedTags, "tag");
+          NODE
+
+      - name: Check with invalid GitHub Release notes
+        id: invalid_notes
+        continue-on-error: true
+        uses: ./
+        with:
+          phase: check
+          source-directory: ${{ env.SOURCE_DIRECTORY }}
+          base-sha: ${{ env.BASE_SHA }}
+          target-sha: ${{ env.TARGET_SHA }}
+          config-path: .github/cargo-release-invalid-notes.yml
+          github-token: ${{ github.token }}
+
+      - name: Assert Cargo validation completed before the notes failure
+        if: always()
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.invalid_notes.outcome }}
+          PLAN: ${{ steps.invalid_notes.outputs.plan }}
+          REPORT: ${{ steps.invalid_notes.outputs.report }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          if (process.env.OUTCOME !== "failure") {
+            throw new Error("invalid GitHub Release notes must fail the check");
+          }
+
+          const plan = JSON.parse(process.env.PLAN ?? "");
+          const report = JSON.parse(process.env.REPORT ?? "");
+          if (plan.packages.length !== 2) {
+            throw new Error("the invalid notes check did not produce the Cargo plan");
+          }
+          if (report.reason !== "incomplete") {
+            throw new Error("the invalid notes check did not finish Cargo reconciliation");
+          }
           NODE

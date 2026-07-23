@@ -373,8 +373,8 @@ remain missing until `finalize` succeeds. A failed publication report includes
 
 | Phase      | Behavior                                                                     |
 | ---------- | ---------------------------------------------------------------------------- |
-| `check`    | Observe all state; if crates are missing, dry-run the complete Cargo plan.   |
-| `publish`  | If needed, dry-run the complete plan, publish missing crates, then poll.     |
+| `check`    | Observe release state and dry-run the complete Cargo plan without writes.    |
+| `publish`  | Preflight the complete plan, publish missing crates, then poll crates.io.    |
 | `finalize` | Require every crate, then reconcile tags and the optional GitHub Release.    |
 | `all`      | Publish missing crates and continue to finalization after crates.io matches. |
 
@@ -382,6 +382,11 @@ remain missing until `finalize` succeeds. A failed publication report includes
 normal pre-release condition. Its JSON report uses `reason: "incomplete"` to
 describe missing objects. Contradictions, transient observation failures, and
 Cargo dry-run failures still fail the step.
+
+Configured GitHub Release notes and Cargo packaging are independent readiness
+checks. In `check`, invalid notes are reported after Cargo reconciliation, so
+both problems can be diagnosed in one run. Every mutating phase rejects invalid
+notes before it observes or changes external release state.
 
 ## Security and permissions
 

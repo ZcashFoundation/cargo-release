@@ -49,6 +49,7 @@ jobs:
           members = ["core", "client"]
           resolver = "2"
           EOF
+          printf '/target\n' > .gitignore
 
           cat > core/Cargo.toml <<EOF
           [package]
@@ -85,7 +86,7 @@ jobs:
 
           printf '# Changelog\n' > CHANGELOG.md
           cargo generate-lockfile
-          git add CHANGELOG.md Cargo.lock Cargo.toml core client
+          git add .gitignore CHANGELOG.md Cargo.lock Cargo.toml core client
           git commit -m "Create smoke workspace"
           base_sha="$(git rev-parse HEAD)"
 

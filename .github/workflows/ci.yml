@@ -46,4 +46,10 @@ jobs:
         run: npm run build
 
       - name: Check bundled action
-        run: git diff --exit-code -- dist
+        run: |
+          if [ -n "$(git status --porcelain=v1 --untracked-files=all -- dist)" ]; then
+            echo "The committed action bundle is not up to date:"
+            git status --short --untracked-files=all -- dist
+            git diff -- dist
+            exit 1
+          fi

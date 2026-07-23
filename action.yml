@@ -1,5 +1,5 @@
-name: Cargo Release Reconcile
-description: Reconcile a Cargo workspace release after partial publication
+name: Resumable Cargo Release
+description: Safely resume partial Cargo workspace releases to crates.io and GitHub
 author: Zcash Foundation
 branding:
   icon: refresh-cw
@@ -22,7 +22,7 @@ inputs:
   config-path:
     description: Release policy path relative to the current workflow checkout
     required: false
-    default: .github/cargo-release-reconcile.yml
+    default: .github/resumable-cargo-release.yml
   github-token:
     description: Token used to observe tags and GitHub Releases in every phase
     required: true

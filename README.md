@@ -1,61 +1,101 @@
-# Cargo Release Reconcile
+# Resumable Cargo Release
 
-`cargo-release-reconcile` resumes a Cargo workspace release after partial
-publication. It derives one immutable plan from the approved base and target
-commits, observes crates.io before writing, verifies Cargo's recorded source
-commit in every existing crate archive, and creates only the missing release
-state.
+[![CI](https://github.com/ZcashFoundation/resumable-cargo-release/actions/workflows/ci.yml/badge.svg)](https://github.com/ZcashFoundation/resumable-cargo-release/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-The action delegates dependency ordering, packaging, and publication to native
-Cargo. It does not add a release database, a dependency solver, or a
-repository-specific workflow framework.
+Safely publish a Cargo workspace even when an earlier release stopped halfway.
 
-## Release composition
+Cargo 1.90 added native multi-package publishing, but a workspace publication
+is still non-atomic. One failed upload can leave some versions on crates.io,
+and retrying the original package set can then collide with versions that
+already exist. Resumable Cargo Release derives the intended release from 2
+immutable commits, verifies crates.io and GitHub state, and creates only what is
+still missing.
 
-Use this action as the post-merge mechanism in a larger release workflow:
+This action is not specific to Zebra. It works with a single Rust package or a
+Cargo workspace in any GitHub repository that publishes to crates.io.
 
-- [release-plz](https://github.com/release-plz/release-plz) can prepare and
-  update the Release PR.
-- [rust-lang/crates-io-auth-action](https://github.com/rust-lang/crates-io-auth-action)
-  supplies a short-lived crates.io token through trusted publishing.
-- Cargo 1.90 or newer performs one complete dry run and publishes the missing
-  package set in dependency order.
-- This action reconciles crate versions, annotated Git tags, and an optional
-  public GitHub Release.
-- The caller retains approval checks, protected environments, changelog policy,
-  binary smoke tests, artifact distribution, and deployment triggers.
+## Is this action a fit?
 
-This division also works for server repositories. The action can publish the
-server's Cargo packages and complete its GitHub release state, while tools such
-as [cargo-dist](https://axodotdev.github.io/cargo-dist/book/) build and attach
-platform artifacts after reconciliation succeeds.
+Use Resumable Cargo Release when:
 
-## Recovery guarantees
+- an approved commit already contains the versions that should be released;
+- the source is hosted on GitHub, and packages publish to crates.io;
+- the workflow needs to recover safely from partial workspace publication;
+- existing crate versions must be verified against the approved source commit;
+  and
+- tags and an optional GitHub Release should appear only after every crate is
+  available.
 
-The target commit is the desired source of truth. Before a mutation, the action
-classifies each external object:
+For a single crate, `cargo publish` may be sufficient. This action adds the most
+value when a workspace has several publishable crates, a release must survive
+reruns, or a server needs a verification gate between crate publication and its
+public tag or GitHub Release.
 
-| State         | Meaning                                                                              | Result                                                              |
-| ------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
-| `matching`    | The object already matches the target commit and release plan.                       | Keep it unchanged.                                                  |
-| `missing`     | The object does not exist.                                                           | Create it in `publish`, `finalize`, or `all`.                       |
-| `repairable`  | A GitHub Release has the correct tag but safe mutable metadata differs.              | Update its title, notes, draft state, or explicit latest selection. |
-| `conflicting` | Existing immutable state points at another commit or otherwise contradicts the plan. | Stop before further writes.                                         |
-| `transient`   | crates.io or GitHub could not be observed reliably.                                  | Stop with a retryable report.                                       |
+Current scope:
 
-Each run submits a missing package set to Cargo at most once. The action then
-polls crates.io without resubmitting that set, which avoids converting registry
-indexing delay into an `already uploaded` error. A later workflow rerun observes
-what succeeded and resumes from the remaining package set.
+- GitHub repositories and GitHub Releases;
+- the crates.io registry;
+- Cargo 1.90 or newer;
+- one Cargo workspace per action invocation; and
+- annotated Git tags plus, optionally, one product-level GitHub Release.
 
-Finalization starts only after every planned crate version exists with the
-expected Cargo-recorded commit. Tags are created next, and the optional GitHub
-Release is created or repaired last. Concurrent tag or release creation is
-safe because the action re-observes desired state after every mutation attempt.
+Other Git forges and Cargo registries are not supported.
 
-## Configuration
+## Where it fits
 
-Add `.github/cargo-release-reconcile.yml` to the consuming repository:
+Resumable Cargo Release owns the post-merge publication and recovery boundary.
+It composes with existing release tools instead of replacing them.
+
+| Tool                                                                        | Responsibility                                                                                                                                   |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [release-plz](https://github.com/release-plz/release-plz)                   | Update versions and changelogs, then prepare the Release PR. Its `release` command remains a simpler option when phased recovery is unnecessary. |
+| Resumable Cargo Release                                                     | Reconstruct the approved release, verify existing crates, publish the missing set with native Cargo, then reconcile tags and release metadata.   |
+| [crates-io-auth-action](https://github.com/rust-lang/crates-io-auth-action) | Supply a short-lived crates.io token through trusted publishing.                                                                                 |
+| [dist](https://github.com/axodotdev/cargo-dist)                             | Build and distribute binaries or installers after the source release is complete.                                                                |
+
+[publish-crates](https://github.com/katyo/publish-crates) is a useful alternative
+that implements its own workspace dependency checks and publication ordering.
+Resumable Cargo Release instead delegates multi-package ordering to Cargo 1.90
+or newer, then concentrates on commit provenance, rerun safety, and GitHub
+finalization.
+
+## How it works
+
+```mermaid
+flowchart LR
+    A["Base and target SHAs"] --> B["Derive Cargo release plan"]
+    B --> C["Observe crates.io and GitHub"]
+    C --> D["Dry-run the complete package set"]
+    D --> E["Publish missing crates"]
+    E --> F["Verify source provenance"]
+    F --> G["Create annotated tags"]
+    G --> H["Create or repair GitHub Release"]
+```
+
+The target commit is the desired source of truth. The action selects
+crates.io-publishable workspace packages whose versions differ between the base
+and target commits. Before writing anything, it observes every planned crate,
+tag, and optional GitHub Release.
+
+Existing crate versions count as complete only when their packaged
+`.cargo_vcs_info.json` records the target commit without a dirty source flag.
+Tags must resolve to the same target commit. Mutable GitHub Release metadata can
+be repaired, but contradictory immutable state stops the run.
+
+## Quick start
+
+### 1. Add release policy
+
+Create `.github/resumable-cargo-release.yml` in the consuming repository:
+
+```yaml
+tagTemplate: "{name}-v{version}"
+```
+
+That minimal policy publishes every changed crates.io package and creates one
+annotated tag per package. Add a product-level GitHub Release when the workspace
+contains a primary application or server:
 
 ```yaml
 tagTemplate: "{name}-v{version}"
@@ -72,114 +112,185 @@ githubRelease:
   makeLatest: auto
 ```
 
-The planner selects publishable workspace packages whose versions differ
-between `base-sha` and `target-sha`. Packages with `publish = false` or a
-registry list that excludes `crates-io` remain outside the plan. The optional
-GitHub Release is included only when its configured package version changes, so
-library-only releases reconcile crate tags without creating a product release.
+The optional GitHub Release is included only when its configured package
+version changes. A library-only release therefore publishes crates and creates
+crate tags without creating a product release.
 
-Templates support `{name}` and `{version}`. `notesHeadingTemplate` identifies a
-Markdown heading prefix, so a changelog heading can append a link or date. Set
-`makeLatest` to `auto`, `true`, or `false`; YAML booleans are normalized to the
-string values expected by GitHub, while `auto` uses GitHub's legacy version and
-creation-date policy. GitHub's REST API does not expose the persistent legacy
-decision, so the action delegates `auto` to GitHub on writes. Explicit `true`
-and `false` settings are observed against the current latest release and
-reconciled. A prerelease cannot set `makeLatest` to `true`.
+### 2. Configure crates.io
 
-## Workflow
+Configure [trusted publishing](https://crates.io/docs/trusted-publishing) for
+each existing crate, then allow the release job to request an OpenID Connect
+token with `id-token: write`. The first version of a new crate may need to be
+published with a conventional crates.io token before trusted publishing can be
+configured for later versions.
 
-The caller must check out the exact target commit with full history, provide
-Cargo 1.90 or newer, and determine the approved base and target SHAs according
-to its own release policy.
+### 3. Add a workflow
+
+This complete workflow runs a release from start to finish. Replace
+`<full-commit-sha>` with a released commit from this repository.
 
 ```yaml
+name: Release Cargo workspace
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Commit before the approved version changes
+        required: true
+        type: string
+      target_sha:
+        description: Approved release commit
+        required: true
+        type: string
+
 permissions:
   contents: write
   id-token: write
 
-steps:
-  - name: Checkout approved release commit
-    uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-    with:
-      ref: ${{ inputs.target-sha }}
-      fetch-depth: 0
-      persist-credentials: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
 
-  - name: Preflight release
-    uses: ZcashFoundation/cargo-release-reconcile@<full-commit-sha>
-    with:
-      phase: check
-      base-sha: ${{ inputs.base-sha }}
-      target-sha: ${{ inputs.target-sha }}
-      github-token: ${{ github.token }}
+    steps:
+      - name: Checkout approved release commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
-  - name: Generate release GitHub App token
-    id: release-app
-    uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-    with:
-      app-id: ${{ secrets.RELEASE_APP_ID }}
-      private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - name: Install Cargo 1.90
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: "1.90.0"
 
-  - name: Authenticate to crates.io
-    id: crates-io
-    uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+      - name: Authenticate to crates.io
+        id: crates_io
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
 
-  - name: Publish missing crates
-    id: publish
-    uses: ZcashFoundation/cargo-release-reconcile@<full-commit-sha>
-    with:
-      phase: publish
-      base-sha: ${{ inputs.base-sha }}
-      target-sha: ${{ inputs.target-sha }}
-      github-token: ${{ steps.release-app.outputs.token }}
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ steps.crates-io.outputs.token }}
-
-  - name: Verify the published product
-    run: cargo install --locked example-server --version "${{ inputs.version }}"
-
-  - name: Finalize tags and GitHub Release
-    id: finalize
-    uses: ZcashFoundation/cargo-release-reconcile@<full-commit-sha>
-    with:
-      phase: finalize
-      base-sha: ${{ inputs.base-sha }}
-      target-sha: ${{ inputs.target-sha }}
-      github-token: ${{ steps.release-app.outputs.token }}
+      - name: Publish and finalize release
+        uses: ZcashFoundation/resumable-cargo-release@<full-commit-sha>
+        with:
+          phase: all
+          base-sha: ${{ inputs.base_sha }}
+          target-sha: ${{ inputs.target_sha }}
+          github-token: ${{ github.token }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates_io.outputs.token }}
 ```
 
-Pin the action to a full commit SHA. GitHub treats a full SHA as the only
-immutable action reference, and Dependabot can keep pinned actions current.
-Use a GitHub App installation token or personal access token for finalization
-when tag or release events must start downstream workflows. Events created with
-the workflow's `GITHUB_TOKEN` do not normally create new workflow runs.
+The base SHA must be an ancestor of the target SHA, and both values must be full
+40-character commit IDs. The target checkout must be clean and contain full
+history. In a release-plz workflow, these commits normally bracket the merged
+Release PR, but each repository retains authority over that policy.
 
-The checkout must be clean, and the local Git object database must contain
-`base-sha` as an ancestor of `target-sha`. The action clones that object
-database into a temporary directory to obtain base metadata without mutating
-the caller's checkout. `config-path` is resolved from the current workflow
-checkout, while `source-directory` and configured release-note files identify
-the immutable release source. A recovery workflow can therefore run the current
-action and policy against a separate historical source checkout.
+Pin every action to a full commit SHA. GitHub treats a full SHA as the only
+immutable action reference, and Dependabot can keep pinned actions current.
+
+### Triggering downstream workflows
+
+Tags and releases created with the workflow's `GITHUB_TOKEN` do not normally
+start new workflow runs. If finalization should trigger artifact or deployment
+workflows, pass a GitHub App installation token or a suitably scoped personal
+access token as `github-token`.
+
+For a GitHub App, generate the token with
+[actions/create-github-app-token](https://github.com/actions/create-github-app-token)
+and grant only `contents: write`.
+
+## Add a product verification gate
+
+Server and application repositories often need to verify the published product
+before exposing a public tag or GitHub Release. Split publication and
+finalization around that repository-owned check:
+
+```yaml
+- name: Publish missing crates
+  uses: ZcashFoundation/resumable-cargo-release@<full-commit-sha>
+  with:
+    phase: publish
+    base-sha: ${{ inputs.base_sha }}
+    target-sha: ${{ inputs.target_sha }}
+    github-token: ${{ steps.release_app.outputs.token }}
+  env:
+    CARGO_REGISTRY_TOKEN: ${{ steps.crates_io.outputs.token }}
+
+- name: Verify the published product
+  run: cargo install --locked example-server --version "${{ inputs.version }}"
+
+- name: Finalize tags and GitHub Release
+  uses: ZcashFoundation/resumable-cargo-release@<full-commit-sha>
+  with:
+    phase: finalize
+    base-sha: ${{ inputs.base_sha }}
+    target-sha: ${{ inputs.target_sha }}
+    github-token: ${{ steps.release_app.outputs.token }}
+```
+
+The `publish` phase completes only after every planned crate matches the target
+commit. The `finalize` phase then creates missing tags and the optional GitHub
+Release. A failed verification leaves a recoverable release with no public
+finalization state.
+
+## Recovery behavior
+
+Each run submits a missing package set to Cargo at most once, then polls
+crates.io without resubmitting that set. A later workflow rerun observes what
+succeeded and derives the remaining package set from external state.
+
+| State         | Meaning                                                                    | Result                                                             |
+| ------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `matching`    | The object matches the target commit and release plan.                     | Keep it unchanged.                                                 |
+| `missing`     | The object does not exist.                                                 | Create it in `publish`, `finalize`, or `all`.                      |
+| `repairable`  | A GitHub Release has the correct tag but mutable metadata differs.         | Update its name, notes, draft state, or explicit latest selection. |
+| `conflicting` | Existing immutable state points at another commit or contradicts the plan. | Stop before further writes.                                        |
+| `transient`   | crates.io or GitHub could not be observed reliably.                        | Stop with a retryable report.                                      |
+
+Finalization starts only after every planned crate version exists with the
+expected Cargo-recorded commit. The action creates tags next and the optional
+GitHub Release last, re-observing state after each mutation attempt to handle
+concurrent creation safely.
+
+## Configuration reference
+
+Templates support `{name}` and `{version}`:
+
+| Field                                 | Required             | Default             | Purpose                                                     |
+| ------------------------------------- | -------------------- | ------------------- | ----------------------------------------------------------- |
+| `tagTemplate`                         | No                   | `{name}-v{version}` | Tag format for every selected package.                      |
+| `packageOverrides.<name>.tagTemplate` | No                   | Global tag template | Per-package tag format.                                     |
+| `githubRelease.package`               | For a GitHub Release |                     | Package whose version identifies the product release.       |
+| `githubRelease.nameTemplate`          | No                   | `{name} {version}`  | GitHub Release name.                                        |
+| `githubRelease.notesFile`             | For a GitHub Release |                     | Release notes file inside the target checkout.              |
+| `githubRelease.notesHeadingTemplate`  | No                   | Entire notes file   | Markdown heading prefix used to select one release section. |
+| `githubRelease.prerelease`            | No                   | Derived from semver | Override prerelease status.                                 |
+| `githubRelease.makeLatest`            | No                   | `auto`              | `auto`, `true`, or `false`; YAML booleans are accepted.     |
+
+`notesHeadingTemplate` must render a Markdown heading. It matches the heading
+prefix, so the source heading may append a link or date. `auto` delegates
+latest-release selection to GitHub's legacy version and creation-date policy.
+An explicit `true` or `false` is observed and reconciled, while a prerelease
+cannot set `makeLatest` to `true`.
 
 ## Inputs and outputs
 
-| Input              | Required | Default                               | Description                                                 |
-| ------------------ | -------- | ------------------------------------- | ----------------------------------------------------------- |
-| `phase`            | No       | `all`                                 | `check`, `publish`, `finalize`, or `all`.                   |
-| `source-directory` | No       | `.`                                   | Cargo workspace within the target checkout.                 |
-| `base-sha`         | Yes      |                                       | Full commit SHA before the approved release change.         |
-| `target-sha`       | Yes      |                                       | Full approved release commit SHA.                           |
-| `config-path`      | No       | `.github/cargo-release-reconcile.yml` | Policy path relative to the current workflow checkout.      |
-| `github-token`     | Yes      |                                       | Token used to observe tags and releases before every phase. |
-| `attempts`         | No       | `3`                                   | Registry observations after one Cargo publication attempt.  |
+| Input              | Required | Default                               | Description                                                |
+| ------------------ | -------- | ------------------------------------- | ---------------------------------------------------------- |
+| `phase`            | No       | `all`                                 | `check`, `publish`, `finalize`, or `all`.                  |
+| `source-directory` | No       | `.`                                   | Cargo workspace within the target checkout.                |
+| `base-sha`         | Yes      |                                       | Full commit SHA before the approved release change.        |
+| `target-sha`       | Yes      |                                       | Full approved release commit SHA.                          |
+| `config-path`      | No       | `.github/resumable-cargo-release.yml` | Policy path relative to the workflow checkout.             |
+| `github-token`     | Yes      |                                       | Token used to observe tags and releases in every phase.    |
+| `attempts`         | No       | `3`                                   | Registry observations after one Cargo publication attempt. |
 
 The `plan` output contains the deterministic release plan as JSON. The `report`
-output contains the final observations for the selected phase. A `complete`
-report from `publish` means crate publication is complete; tags and the GitHub
-Release can still be missing until `finalize` succeeds. A failed publication
-report includes `operationError` when Cargo returned an error.
+output contains observations for the selected phase. A `complete` report from
+`publish` means crate publication is complete; tags and the GitHub Release can
+remain missing until `finalize` succeeds. A failed publication report includes
+`operationError` when Cargo returned an error.
 
 ## Phases
 
@@ -192,26 +303,39 @@ report includes `operationError` when Cargo returned an error.
 
 `check` exits successfully when desired state is incomplete because that is the
 normal pre-release condition. Its JSON report uses `reason: "incomplete"` to
-describe the missing objects. Contradictions, transient observation failures,
-and Cargo dry-run failures still fail the step.
+describe missing objects. Contradictions, transient observation failures, and
+Cargo dry-run failures still fail the step.
 
-Product releases should use `publish`, run their repository-owned install or
-runtime verification, and call `finalize` only after that gate succeeds. Use
-`all` only when the caller has no required verification between publication
-and tags or the public GitHub Release.
-
-## Security boundary
+## Security and permissions
 
 The action accepts package identities only from Cargo metadata at the target
-commit. It passes package names as argument-array elements rather than shell
+commit. It passes package names as argument-array elements instead of shell
 source, bounds downloaded crate archives, parses them without extracting files,
-and requires the archive's `.cargo_vcs_info.json` to record the target SHA
-without a dirty source flag.
+and verifies the archive's Cargo-recorded source commit.
 
-The crates.io token stays in `CARGO_REGISTRY_TOKEN` and is managed by the
-official authentication action. The GitHub token is used only for repository
-tag and release APIs. Callers should grant only `contents: write` and
-`id-token: write`, preferably through a protected release environment.
+The crates.io token stays in `CARGO_REGISTRY_TOKEN`; the official authentication
+action revokes its temporary token when the job ends. The GitHub token is used
+only for repository tag and release APIs. Prefer a protected release
+environment, `contents: write`, and `id-token: write`, without broader
+permissions.
+
+The action clones the local Git object database into a temporary directory to
+read base metadata without mutating the caller's checkout. `config-path` is
+resolved from the workflow checkout, while `source-directory` and release-note
+files identify the immutable release source. A recovery workflow can therefore
+run current action code and policy against a separate historical source
+checkout.
+
+## Limitations
+
+- Only crates.io and GitHub are supported.
+- The action does not choose versions, update changelogs, or create a Release
+  PR.
+- It does not build binaries, attach artifacts, or deploy a product.
+- It requires Cargo 1.90 or newer for native multi-package publication.
+- It creates annotated tags for changed crates; lightweight tags are not an
+  option.
+- A configured GitHub Release belongs to one changed package per invocation.
 
 ## License
 

@@ -96,7 +96,6 @@ beforeEach(() => {
     "source-directory": "release-source",
     "base-sha": plan.source.baseSha,
     "target-sha": plan.source.targetSha,
-    "config-path": ".github/release.yml",
     "github-token": "masked-token",
   };
   mocks.getInput.mockImplementation((name: string) => inputs[name] ?? "");
@@ -175,7 +174,7 @@ test("assembles a side-effect-free check and succeeds for incomplete state", asy
       sourceDirectory: expect.stringMatching(/release-source$/),
       baseSha: plan.source.baseSha,
       targetSha: plan.source.targetSha,
-      configPath: ".github/release.yml",
+      configPath: ".github/resumable-cargo-release.yml",
     },
     expect.any(Object),
   );

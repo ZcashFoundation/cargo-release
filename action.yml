@@ -1,0 +1,40 @@
+name: Cargo Release
+description: Resumable Cargo workspace publishing for crates.io and GitHub
+author: Zcash Foundation
+branding:
+  icon: refresh-cw
+  color: blue
+inputs:
+  phase:
+    description: "Reconciliation phase: check, publish, finalize, or all"
+    required: false
+    default: all
+  source-directory:
+    description: Target-commit checkout containing the Cargo workspace
+    required: false
+    default: .
+  base-sha:
+    description: Full commit SHA before the approved release change
+    required: true
+  target-sha:
+    description: Full approved release commit SHA
+    required: true
+  config-path:
+    description: Release policy path relative to the current workflow checkout
+    required: false
+    default: .github/cargo-release.yml
+  github-token:
+    description: Token used to observe tags and GitHub Releases in every phase
+    required: true
+  attempts:
+    description: Maximum registry observations after one publication attempt
+    required: false
+    default: "3"
+outputs:
+  plan:
+    description: Deterministic release plan as JSON
+  report:
+    description: Selected-phase reconciliation report as JSON
+runs:
+  using: node24
+  main: dist/index.js

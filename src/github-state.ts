@@ -1,3 +1,4 @@
+import { errorMessage } from "./errors.js";
 import type { Observation } from "./reconcile.js";
 import type { GithubRelease, ReleasePackage } from "./release-plan.js";
 
@@ -251,18 +252,6 @@ function statusOf(error: unknown): number | undefined {
   return typeof error.status === "number" ? error.status : undefined;
 }
 
-function messageOf(error: unknown): string {
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "message" in error &&
-    typeof error.message === "string"
-  ) {
-    return error.message;
-  }
-  return String(error);
-}
-
 function errorObservation(
   subject: string,
   context: string,
@@ -277,7 +266,7 @@ function errorObservation(
     isNetworkError(error)
       ? "transient"
       : "conflicting";
-  return { state, subject, detail: `${context}: ${messageOf(error)}` };
+  return { state, subject, detail: `${context}: ${errorMessage(error)}` };
 }
 
 function isNetworkError(error: unknown): boolean {

@@ -5,6 +5,9 @@ import { parse as parseYaml } from "yaml";
 
 import {
   deriveReleasePlan,
+  findGithubReleaseCandidate,
+  renderReleaseTemplate,
+  validateReleaseSource,
   type CargoMetadataSnapshot,
   type ReleasePlan,
   type ReleasePlanConfig,
@@ -52,6 +55,8 @@ export async function loadReleasePlan(
   options: LoadReleasePlanOptions,
   ports: WorkspacePlanPorts,
 ): Promise<ReleasePlan> {
+  validateReleaseSource(options.baseSha, options.targetSha);
+
   const controllerDirectory = path.resolve(options.controllerDirectory);
   const sourceDirectory = path.resolve(options.sourceDirectory);
   const cargoVersion = await requiredRun(
@@ -261,9 +266,8 @@ export function parseReleasePlanConfig(source: string): ReleasePlanConfig {
       ...(release.makeLatest === undefined
         ? {}
         : {
-            makeLatest: requireEnum(
+            makeLatest: requireMakeLatest(
               release.makeLatest,
-              ["auto", "true", "false"] as const,
               "githubRelease.makeLatest",
             ),
           }),
@@ -280,7 +284,7 @@ export function extractReleaseNotes(
 ): string {
   if (headingTemplate === undefined) return requireNotes(source);
 
-  const heading = renderTemplate(headingTemplate, item);
+  const heading = renderReleaseTemplate(headingTemplate, item);
   const headingLevel = /^(#{1,6})\s/.exec(heading)?.[1]?.length;
   if (headingLevel === undefined) {
     throw new Error(
@@ -358,13 +362,12 @@ function requireEnum<const T extends readonly string[]>(
   return value;
 }
 
-function renderTemplate(
-  template: string,
-  item: { readonly name: string; readonly version: string },
-): string {
-  return template
-    .replaceAll("{name}", item.name)
-    .replaceAll("{version}", item.version);
+function requireMakeLatest(
+  value: unknown,
+  label: string,
+): "auto" | "true" | "false" {
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return requireEnum(value, ["auto", "true", "false"] as const, label);
 }
 
 function requireNotes(source: string): string {
@@ -486,14 +489,12 @@ function parseCargoMetadata(
       name: item.name as string,
       version: item.version as string,
       manifest_path: item.manifest_path as string,
-      ...(item.publish === undefined
-        ? {}
-        : { publish: item.publish as string[] | null }),
+      ...(item.publish === undefined ? {} : { publish: item.publish }),
     };
   });
   return {
     workspace_root: metadata.workspace_root,
-    workspace_members: metadata.workspace_members as string[],
+    workspace_members: metadata.workspace_members,
     packages,
   };
 }
@@ -507,28 +508,8 @@ async function loadNotes(
 ): Promise<string | undefined> {
   const release = config.githubRelease;
   if (release === undefined) return undefined;
-  const item = targetMetadata.packages.find(
-    (candidate) =>
-      candidate.name === release.package &&
-      targetMetadata.workspace_members.includes(candidate.id),
-  );
-  if (item === undefined) {
-    throw new Error(
-      `GitHub Release package "${release.package}" is not in the target workspace`,
-    );
-  }
-  const baseItem = baseMetadata.packages.find(
-    (candidate) =>
-      candidate.name === release.package &&
-      baseMetadata.workspace_members.includes(candidate.id),
-  );
-  const isCratesIoPublishable =
-    item.publish === null ||
-    item.publish === undefined ||
-    item.publish.includes("crates-io");
-  if (!isCratesIoPublishable || baseItem?.version === item.version) {
-    return undefined;
-  }
+  const item = findGithubReleaseCandidate(baseMetadata, targetMetadata, config);
+  if (item === undefined) return undefined;
   if (release.notesFile === undefined) {
     throw new Error("githubRelease.notesFile must be configured");
   }

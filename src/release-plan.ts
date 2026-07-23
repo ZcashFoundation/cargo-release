@@ -69,6 +69,11 @@ export interface DeriveReleasePlanOptions {
   readonly notes?: string;
 }
 
+interface ReleaseSelection {
+  readonly targetPackages: readonly CargoPackageSnapshot[];
+  readonly candidates: readonly CargoPackageSnapshot[];
+}
+
 const DEFAULT_TAG_TEMPLATE = "{name}-v{version}";
 const FULL_COMMIT_SHA = /^[0-9a-f]{40}$/i;
 const FORBIDDEN_REF_CHARACTERS = new Set([
@@ -90,32 +95,18 @@ export function deriveReleasePlan({
   config,
   notes,
 }: DeriveReleasePlanOptions): ReleasePlan {
-  validateSource(baseSha, targetSha);
+  validateReleaseSource(baseSha, targetSha);
 
-  const baseWorkspacePackages = getWorkspacePackages(baseMetadata, "base");
-  const targetWorkspacePackages = getWorkspacePackages(
-    targetMetadata,
-    "target",
-  );
-  validatePackageOverrides(config, targetWorkspacePackages);
-  validateGithubReleaseConfig(config, targetWorkspacePackages);
-  const baseVersions = new Map(
-    baseWorkspacePackages.map((item) => [item.name, item.version]),
-  );
+  const selection = selectReleasePackages(baseMetadata, targetMetadata);
+  validatePackageOverrides(config, selection.targetPackages);
+  validateGithubReleaseConfig(config, selection.targetPackages);
 
-  const packages = targetWorkspacePackages
-    .filter(
-      (item) =>
-        item.publish === null ||
-        item.publish === undefined ||
-        item.publish.includes("crates-io"),
-    )
-    .filter((item) => baseVersions.get(item.name) !== item.version)
+  const packages = selection.candidates
     .map((item): ReleasePackage => ({
       name: item.name,
       version: item.version,
       manifestPath: relativeManifestPath(targetMetadata, item, "target"),
-      tag: renderTemplate(
+      tag: renderReleaseTemplate(
         config.packageOverrides?.[item.name]?.tagTemplate ??
           config.tagTemplate ??
           DEFAULT_TAG_TEMPLATE,
@@ -138,6 +129,34 @@ export function deriveReleasePlan({
     packages,
     ...(githubRelease === undefined ? {} : { githubRelease }),
   };
+}
+
+export function validateReleaseSource(
+  baseSha: string,
+  targetSha: string,
+): void {
+  if (!FULL_COMMIT_SHA.test(baseSha)) {
+    throw new Error("baseSha must be a full 40-character commit SHA");
+  }
+  if (!FULL_COMMIT_SHA.test(targetSha)) {
+    throw new Error("targetSha must be a full 40-character commit SHA");
+  }
+  if (baseSha.toLowerCase() === targetSha.toLowerCase()) {
+    throw new Error("baseSha and targetSha must identify different commits");
+  }
+}
+
+export function findGithubReleaseCandidate(
+  baseMetadata: CargoMetadataSnapshot,
+  targetMetadata: CargoMetadataSnapshot,
+  config: ReleasePlanConfig,
+): CargoPackageSnapshot | undefined {
+  const packageName = config.githubRelease?.package;
+  if (packageName === undefined) return undefined;
+
+  const selection = selectReleasePackages(baseMetadata, targetMetadata);
+  validateGithubReleaseConfig(config, selection.targetPackages);
+  return selection.candidates.find((item) => item.name === packageName);
 }
 
 function validateUniqueTags(packages: readonly ReleasePackage[]): void {
@@ -231,7 +250,7 @@ function deriveGithubRelease(
 
   return {
     tag: item.tag,
-    name: renderTemplate(
+    name: renderReleaseTemplate(
       config.githubRelease.nameTemplate ?? "{name} {version}",
       item,
     ),
@@ -326,7 +345,7 @@ function relativeManifestPath(
   return relative.split(pathApi.sep).join("/");
 }
 
-function pathApiFor(value: string): typeof path.posix | typeof path.win32 {
+function pathApiFor(value: string): typeof path.posix {
   return path.win32.isAbsolute(value) && !path.posix.isAbsolute(value)
     ? path.win32
     : path.posix;
@@ -346,19 +365,32 @@ function validatePackage(
   }
 }
 
-function validateSource(baseSha: string, targetSha: string): void {
-  if (!FULL_COMMIT_SHA.test(baseSha)) {
-    throw new Error("baseSha must be a full 40-character commit SHA");
-  }
-  if (!FULL_COMMIT_SHA.test(targetSha)) {
-    throw new Error("targetSha must be a full 40-character commit SHA");
-  }
-  if (baseSha.toLowerCase() === targetSha.toLowerCase()) {
-    throw new Error("baseSha and targetSha must identify different commits");
-  }
+function selectReleasePackages(
+  baseMetadata: CargoMetadataSnapshot,
+  targetMetadata: CargoMetadataSnapshot,
+): ReleaseSelection {
+  const baseWorkspacePackages = getWorkspacePackages(baseMetadata, "base");
+  const targetPackages = getWorkspacePackages(targetMetadata, "target");
+  const baseVersions = new Map(
+    baseWorkspacePackages.map((item) => [item.name, item.version]),
+  );
+  const candidates = targetPackages.filter(
+    (item) =>
+      isCratesIoPublishable(item) &&
+      baseVersions.get(item.name) !== item.version,
+  );
+  return { targetPackages, candidates };
 }
 
-function renderTemplate(
+function isCratesIoPublishable(item: CargoPackageSnapshot): boolean {
+  return (
+    item.publish === null ||
+    item.publish === undefined ||
+    item.publish.includes("crates-io")
+  );
+}
+
+export function renderReleaseTemplate(
   template: string,
   item: Pick<CargoPackageSnapshot, "name" | "version">,
 ): string {

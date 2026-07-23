@@ -80,11 +80,12 @@ library-only releases reconcile crate tags without creating a product release.
 
 Templates support `{name}` and `{version}`. `notesHeadingTemplate` identifies a
 Markdown heading prefix, so a changelog heading can append a link or date. Set
-`makeLatest` to `auto`, `true`, or `false`; `auto` uses GitHub's legacy
-version and creation-date policy. GitHub's REST API does not expose the
-persistent legacy decision, so the action delegates `auto` to GitHub on writes.
-Explicit `true` and `false` settings are observed against the current latest
-release and reconciled. A prerelease cannot set `makeLatest` to `true`.
+`makeLatest` to `auto`, `true`, or `false`; YAML booleans are normalized to the
+string values expected by GitHub, while `auto` uses GitHub's legacy version and
+creation-date policy. GitHub's REST API does not expose the persistent legacy
+decision, so the action delegates `auto` to GitHub on writes. Explicit `true`
+and `false` settings are observed against the current latest release and
+reconciled. A prerelease cannot set `makeLatest` to `true`.
 
 ## Workflow
 

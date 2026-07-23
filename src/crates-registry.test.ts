@@ -190,7 +190,7 @@ describe("observeCrateVersion", () => {
     ).resolves.toMatchObject({
       state: "conflicting",
       subject: "example@1.2.3",
-      reason: "archive has no .cargo_vcs_info.json provenance",
+      detail: "archive has no .cargo_vcs_info.json provenance",
     });
   });
 

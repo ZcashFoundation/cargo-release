@@ -8,6 +8,7 @@ import * as github from "@actions/github";
 
 import { CargoPublisher } from "./cargo-publisher.js";
 import { observeCrateVersion } from "./crates-registry.js";
+import { asError, errorMessage } from "./errors.js";
 import {
   GithubState,
   type CreateAnnotatedTagInput,
@@ -40,11 +41,8 @@ async function run(): Promise<void> {
   const targetSha = core.getInput("target-sha", { required: true });
   const configPath =
     core.getInput("config-path") || ".github/cargo-release-reconcile.yml";
-  const githubToken = core.getInput("github-token");
-  if (githubToken.length > 0) core.setSecret(githubToken);
-  if (githubToken.length === 0) {
-    throw new Error("github-token is required for every phase");
-  }
+  const githubToken = core.getInput("github-token", { required: true });
+  core.setSecret(githubToken);
 
   const plan = await loadReleasePlan(
     {
@@ -63,18 +61,13 @@ async function run(): Promise<void> {
     async (command, args, cwd) =>
       exec.exec(command, args, { cwd, ignoreReturnCode: true }),
   );
-  const githubState =
-    githubToken.length === 0
-      ? undefined
-      : new GithubState(githubApi(githubToken), plan.source.targetSha);
-  const requireGithub = (): GithubState => {
-    if (githubState === undefined)
-      throw new Error("GitHub state is unavailable without github-token");
-    return githubState;
-  };
+  const githubState = new GithubState(
+    githubApi(githubToken),
+    plan.source.targetSha,
+  );
   const ports: ReconcilePorts = {
     async observePackage(item) {
-      const observation = await observeCrateVersion({
+      return observeCrateVersion({
         name: item.name,
         version: item.version,
         expectedSha: plan.source.targetSha,
@@ -82,13 +75,6 @@ async function run(): Promise<void> {
         downloadUrl: CRATES_IO_DOWNLOAD,
         fetch: cratesIoFetch,
       });
-      return observation.state === "matching" || observation.state === "missing"
-        ? observation
-        : {
-            state: observation.state,
-            subject: observation.subject,
-            detail: observation.reason,
-          };
     },
     async dryRunPackages(items) {
       await publisher.dryRun(items);
@@ -97,19 +83,19 @@ async function run(): Promise<void> {
       await publisher.publish(items);
     },
     async observeTag(item) {
-      return requireGithub().observeTag(item);
+      return githubState.observeTag(item);
     },
     async createTag(item) {
-      await requireGithub().createTag(item);
+      await githubState.createTag(item);
     },
     async observeGithubRelease(release) {
-      return requireGithub().observeGithubRelease(release);
+      return githubState.observeGithubRelease(release);
     },
     async createGithubRelease(release) {
-      await requireGithub().createGithubRelease(release);
+      await githubState.createGithubRelease(release);
     },
     async updateGithubRelease(release) {
-      await requireGithub().updateGithubRelease(release);
+      await githubState.updateGithubRelease(release);
     },
     async wait() {
       await new Promise((resolve) =>
@@ -132,7 +118,11 @@ async function run(): Promise<void> {
       .filter((observation) => observation.state !== "matching")
       .map(
         (observation) =>
-          `${observation.subject}: ${observation.detail ?? observation.state}`,
+          `${observation.subject}: ${
+            observation.state === "missing"
+              ? observation.state
+              : observation.detail
+          }`,
       )
       .join("; ");
     const operation =
@@ -250,7 +240,7 @@ function githubApi(token: string): GithubApi {
         ) {
           return undefined;
         }
-        throw error;
+        throw asError(error);
       }
     },
     async createRelease(input: CreateReleaseInput) {
@@ -311,5 +301,5 @@ const cratesIoFetch: typeof globalThis.fetch = (input, init) => {
 };
 
 run().catch((error: unknown) => {
-  core.setFailed(error instanceof Error ? error.message : String(error));
+  core.setFailed(errorMessage(error));
 });

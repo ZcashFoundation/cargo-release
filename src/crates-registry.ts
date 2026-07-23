@@ -1,14 +1,10 @@
 import { Parser } from "tar";
 
+import type { Observation } from "./reconcile.js";
+
 const DEFAULT_MAX_ARCHIVE_BYTES = 32 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MILLISECONDS = 30_000;
 const MAX_PROVENANCE_BYTES = 64 * 1024;
-
-export type RegistryObservation =
-  | { state: "missing"; subject: string }
-  | { state: "matching"; subject: string }
-  | { state: "conflicting"; subject: string; reason: string }
-  | { state: "transient"; subject: string; reason: string };
 
 export interface ObserveCrateVersionInput {
   /** The exact package identity to look up. */
@@ -35,20 +31,21 @@ function endpoint(template: string, name: string, version: string): string {
     .replaceAll("{version}", encodeURIComponent(version));
 }
 
-function transient(subject: string, reason: string): RegistryObservation {
-  return { state: "transient", subject, reason };
+function transient(subject: string, detail: string): Observation {
+  return { state: "transient", subject, detail };
 }
 
 function statusObservation(
   subject: string,
   response: Response,
   allowMissing: boolean,
-): RegistryObservation | undefined {
+): Observation | undefined {
   if (response.status === 404 && allowMissing)
     return { state: "missing", subject };
   if (response.status === 429 || response.status >= 500 || !response.ok) {
     return transient(subject, `registry returned HTTP ${response.status}`);
   }
+  return undefined;
 }
 
 async function boundedBody(
@@ -62,7 +59,8 @@ async function boundedBody(
 
   if (response.body === null) return Buffer.alloc(0);
 
-  const reader = response.body.getReader();
+  const reader: ReadableStreamDefaultReader<Uint8Array> =
+    response.body.getReader();
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   try {
@@ -155,7 +153,7 @@ function hasExpectedProvenance(value: unknown, expectedSha: string): boolean {
  */
 export async function observeCrateVersion(
   input: ObserveCrateVersionInput,
-): Promise<RegistryObservation> {
+): Promise<Observation> {
   const subject = subjectFor(input.name, input.version);
   const request = input.fetch ?? globalThis.fetch;
   const maximum = input.maxArchiveBytes ?? DEFAULT_MAX_ARCHIVE_BYTES;
@@ -202,7 +200,7 @@ export async function observeCrateVersion(
     archive = await boundedBody(archiveResponse, maximum);
   } catch (error) {
     return error instanceof RangeError
-      ? { state: "conflicting", subject, reason: error.message }
+      ? { state: "conflicting", subject, detail: error.message }
       : transient(subject, "crate archive download failed");
   }
 
@@ -216,7 +214,7 @@ export async function observeCrateVersion(
     return {
       state: "conflicting",
       subject,
-      reason:
+      detail:
         error instanceof Error
           ? error.message
           : "crate archive provenance is invalid",
@@ -228,7 +226,7 @@ export async function observeCrateVersion(
   return {
     state: "conflicting",
     subject,
-    reason:
+    detail:
       "crate archive provenance does not match the expected clean source commit",
   };
 }

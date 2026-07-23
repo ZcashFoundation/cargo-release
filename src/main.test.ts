@@ -109,7 +109,10 @@ beforeEach(() => {
     state: "missing",
     subject: "example-v1.2.3",
   });
-  mocks.observeGithubRelease.mockResolvedValue(undefined);
+  mocks.observeGithubRelease.mockResolvedValue({
+    state: "missing",
+    subject: "release",
+  });
   mocks.getRef.mockResolvedValue({
     data: { object: { type: "commit", sha: plan.source.targetSha } },
   });
@@ -162,6 +165,9 @@ test("assembles a side-effect-free check and succeeds for incomplete state", asy
   );
 
   expect(mocks.setSecret).toHaveBeenCalledWith("masked-token");
+  expect(mocks.getInput).toHaveBeenCalledWith("github-token", {
+    required: true,
+  });
   expect(mocks.getOctokit).toHaveBeenCalledExactlyOnceWith("masked-token");
   expect(mocks.loadReleasePlan).toHaveBeenCalledWith(
     {

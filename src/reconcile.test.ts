@@ -1,7 +1,8 @@
-import { describe, expect, test, vi } from "vitest";
+import { describe, expect, expectTypeOf, test, vi } from "vitest";
 
 import {
   reconcile,
+  type FailedReport,
   type Observation,
   type ReconcilePorts,
   type ReleasePlan,
@@ -34,7 +35,10 @@ function matchingPorts(): ReconcilePorts {
     publishPackages: async () => undefined,
     observeTag: async (item) => matching(item.tag),
     createTag: async () => undefined,
-    observeGithubRelease: async () => undefined,
+    observeGithubRelease: async (release) => ({
+      state: "missing",
+      subject: release.tag,
+    }),
     createGithubRelease: async () => undefined,
     updateGithubRelease: async () => undefined,
     wait: async () => undefined,
@@ -42,6 +46,18 @@ function matchingPorts(): ReconcilePorts {
 }
 
 describe("reconcile", () => {
+  test("ties failure reasons to their retry contract", () => {
+    expectTypeOf<
+      Extract<FailedReport, { reason: "conflict" }>["retryable"]
+    >().toEqualTypeOf<false>();
+    expectTypeOf<
+      Extract<FailedReport, { reason: "transient" }>["retryable"]
+    >().toEqualTypeOf<true>();
+    expectTypeOf<
+      Extract<FailedReport, { reason: "incomplete" }>["retryable"]
+    >().toEqualTypeOf<true>();
+  });
+
   test("reports an already complete release without writing", async () => {
     const ports = matchingPorts();
     const report = await reconcile(plan, "all", ports, { attempts: 3 });
@@ -598,7 +614,7 @@ describe("reconcile", () => {
     });
   });
 
-  test("treats an absent GitHub Release observation as missing and verifies its creation", async () => {
+  test("uses an explicit missing GitHub Release observation and verifies its creation", async () => {
     const releasePlan: ReleasePlan = {
       ...plan,
       githubRelease: {
@@ -610,11 +626,12 @@ describe("reconcile", () => {
       },
     };
     const ports = matchingPorts();
-    const observations = [undefined, matching("v1.2.3")];
+    const observations: Observation[] = [
+      { state: "missing", subject: "v1.2.3" },
+      matching("v1.2.3"),
+    ];
     ports.observeGithubRelease = async () => {
       const observation = observations.shift();
-      if (observation === undefined && observations.length === 1)
-        return undefined;
       if (!observation) throw new Error("unexpected release observation");
       return observation;
     };

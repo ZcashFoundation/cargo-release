@@ -1,0 +1,155 @@
+name: Hosted action smoke
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check bundled action
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout action
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Cargo 1.90
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: "1.90.0"
+
+      - name: Create a release workspace with base and target commits
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_directory="$(mktemp -d "${RUNNER_TEMP}/cargo-release-hosted-smoke.XXXXXX")"
+          core_name="cargo-release-hosted-smoke-a-core-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          client_name="cargo-release-hosted-smoke-b-client-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          mkdir -p "${source_directory}/core/src" "${source_directory}/client/src"
+          cd "${source_directory}"
+          git init --initial-branch=main
+          git config user.email "cargo-release-smoke@example.invalid"
+          git config user.name "Cargo Release smoke"
+
+          cat > Cargo.toml <<'EOF'
+          [workspace]
+          members = ["core", "client"]
+          resolver = "2"
+          EOF
+
+          cat > core/Cargo.toml <<EOF
+          [package]
+          name = "${core_name}"
+          version = "0.1.0"
+          edition = "2021"
+          description = "Temporary Cargo Release hosted smoke core package"
+          license = "MIT"
+          EOF
+
+          cat > core/src/lib.rs <<'EOF'
+          pub fn smoke_value() -> &'static str {
+              "core"
+          }
+          EOF
+
+          cat > client/Cargo.toml <<EOF
+          [package]
+          name = "${client_name}"
+          version = "0.1.0"
+          edition = "2021"
+          description = "Temporary Cargo Release hosted smoke client package"
+          license = "MIT"
+
+          [dependencies]
+          ${core_name} = { path = "../core", version = "0.1.0" }
+          EOF
+
+          cat > client/src/lib.rs <<EOF
+          pub fn smoke_value() -> &'static str {
+              ${core_name//-/_}::smoke_value()
+          }
+          EOF
+
+          cargo generate-lockfile
+          git add Cargo.lock Cargo.toml core client
+          git commit -m "Create smoke workspace"
+          base_sha="$(git rev-parse HEAD)"
+
+          sed -i 's/version = "0.1.0"/version = "0.1.1"/g' core/Cargo.toml client/Cargo.toml
+          cargo generate-lockfile
+          git add Cargo.lock core/Cargo.toml client/Cargo.toml
+          git commit -m "Prepare smoke release"
+          target_sha="$(git rev-parse HEAD)"
+
+          {
+            printf 'SOURCE_DIRECTORY=%s\n' "${source_directory}"
+            printf 'BASE_SHA=%s\n' "${base_sha}"
+            printf 'TARGET_SHA=%s\n' "${target_sha}"
+            printf 'CORE_NAME=%s\n' "${core_name}"
+            printf 'CLIENT_NAME=%s\n' "${client_name}"
+          } >> "${GITHUB_ENV}"
+          printf '%s\n' '{}' > "${GITHUB_WORKSPACE}/.github/cargo-release-hosted-smoke.yml"
+
+      - name: Run the committed action in check mode
+        id: release
+        uses: ./
+        with:
+          phase: check
+          source-directory: ${{ env.SOURCE_DIRECTORY }}
+          base-sha: ${{ env.BASE_SHA }}
+          target-sha: ${{ env.TARGET_SHA }}
+          config-path: .github/cargo-release-hosted-smoke.yml
+          github-token: ${{ github.token }}
+
+      - name: Assert the check report
+        shell: bash
+        env:
+          PLAN: ${{ steps.release.outputs.plan }}
+          REPORT: ${{ steps.release.outputs.report }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          const expectedNames = [process.env.CORE_NAME, process.env.CLIENT_NAME];
+          const expectedPackages = expectedNames.map((name) => `${name}@0.1.1`);
+          const expectedTags = expectedNames.map((name) => `${name}-v0.1.1`);
+          const plan = JSON.parse(process.env.PLAN ?? "");
+          const report = JSON.parse(process.env.REPORT ?? "");
+
+          if (plan.schemaVersion !== 1) throw new Error("plan schema version is invalid");
+          if (plan.source.baseSha !== process.env.BASE_SHA) throw new Error("plan base SHA is invalid");
+          if (plan.source.targetSha !== process.env.TARGET_SHA) throw new Error("plan target SHA is invalid");
+          if (JSON.stringify(plan.packages.map(({ name, version }) => `${name}@${version}`)) !== JSON.stringify(expectedPackages)) {
+            throw new Error("plan packages do not match the target workspace");
+          }
+          if (report.state !== "failed" || report.reason !== "incomplete" || report.retryable !== true) {
+            throw new Error("check report must describe the unpublished release as retryable and incomplete");
+          }
+          if ("githubRelease" in report) throw new Error("smoke workspace must not configure a GitHub Release");
+
+          const assertMissing = (observations, expected, label) => {
+            if (!Array.isArray(observations) || observations.length !== expected.length) {
+              throw new Error(`${label} observations have an unexpected length`);
+            }
+            const actual = observations.map(({ state, subject }) => ({ state, subject }));
+            const wanted = expected.map((subject) => ({ state: "missing", subject }));
+            if (JSON.stringify(actual) !== JSON.stringify(wanted)) {
+              throw new Error(`${label} observations do not match the unpublished smoke release`);
+            }
+          };
+
+          assertMissing(report.packages, expectedPackages, "package");
+          assertMissing(report.tags, expectedTags, "tag");
+          NODE

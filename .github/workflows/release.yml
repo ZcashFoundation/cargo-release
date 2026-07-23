@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version tag (vMAJOR.MINOR.PATCH)
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+
+jobs:
+  release:
+    name: Tag and publish release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Create the release tag and the GitHub Release.
+    steps:
+      - name: Validate the version input
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! printf '%s' "${VERSION}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "version must match vMAJOR.MINOR.PATCH, got: ${VERSION}"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build action
+        run: npm run build
+
+      - name: Check bundled action
+        run: |
+          if [ -n "$(git status --porcelain=v1 --untracked-files=all -- dist)" ]; then
+            echo "The committed action bundle is not up to date:"
+            git status --short --untracked-files=all -- dist
+            git diff -- dist
+            exit 1
+          fi
+
+      - name: Create the annotated tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${VERSION}" >/dev/null 2>&1; then
+            echo "tag ${VERSION} already exists"
+            exit 1
+          fi
+          tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags" \
+            --field tag="${VERSION}" \
+            --field message="Cargo Release ${VERSION}" \
+            --field object="${GITHUB_SHA}" \
+            --field type=commit \
+            --jq .sha)"
+          gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+            --field ref="refs/tags/${VERSION}" \
+            --field sha="${tag_sha}" >/dev/null
+          gh release create "${VERSION}" \
+            --verify-tag \
+            --title "${VERSION}" \
+            --generate-notes

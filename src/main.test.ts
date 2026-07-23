@@ -90,6 +90,7 @@ vi.mock("./reconcile.js", () => ({
 }));
 
 beforeEach(() => {
+  process.env["INPUT_GITHUB-TOKEN"] = "masked-token";
   const inputs: Record<string, string> = {
     phase: "check",
     attempts: "3",
@@ -164,6 +165,7 @@ test("assembles a side-effect-free check and succeeds for incomplete state", asy
   );
 
   expect(mocks.setSecret).toHaveBeenCalledWith("masked-token");
+  expect(process.env["INPUT_GITHUB-TOKEN"]).toBeUndefined();
   expect(mocks.getInput).toHaveBeenCalledWith("github-token", {
     required: true,
   });

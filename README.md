@@ -408,6 +408,21 @@ files identify the immutable release source. A recovery workflow can therefore
 run current action code and policy against a separate historical source
 checkout.
 
+### Verifying the bundled action
+
+Every push to `main` publishes a build-provenance attestation for the committed
+`dist/index.js` bundle. Before pinning a commit, verify from a checkout of that
+commit that the bundle was built by this repository's CI:
+
+```sh
+gh attestation verify dist/index.js --repo ZcashFoundation/cargo-release
+```
+
+### Maintainer releases
+
+The maintainer release process, including how `dist/` is rebuilt and verified,
+is documented in [docs/RELEASING.md](docs/RELEASING.md).
+
 ## Limitations
 
 - Only crates.io and GitHub are supported.

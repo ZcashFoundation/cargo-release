@@ -6,6 +6,7 @@
   "engines": {
     "node": ">=24"
   },
+  "packageManager": "npm@11.16.0",
   "scripts": {
     "build": "ncc build src/main.ts --minify --source-map",
     "format": "prettier --write .",

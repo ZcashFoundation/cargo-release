@@ -251,13 +251,99 @@ describe("loadReleasePlan", () => {
         ports,
       ),
     ).resolves.toMatchObject({
-      source: { baseSha: BASE_SHA, targetSha: TARGET_SHA },
-      packages: [{ name: "example", version: "2.0.0" }],
-      githubRelease: { notes: "Release notes." },
+      plan: {
+        source: { baseSha: BASE_SHA, targetSha: TARGET_SHA },
+        packages: [{ name: "example", version: "2.0.0" }],
+        githubRelease: { notes: "Release notes." },
+      },
     });
     expect(removed).toBe("/tmp/reconcile/base");
     expect(calls).toContain(
       `git checkout --detach ${BASE_SHA} @ /tmp/reconcile/base/repository`,
+    );
+  });
+
+  it("retains the package plan when GitHub Release notes are invalid", async () => {
+    const targetMetadata = metadata("/repo", "2.0.0");
+    const baseMetadata = metadata("/tmp/reconcile/base/repository", "1.0.0");
+    const responses = new Map<string, CommandResult>([
+      ["cargo --version @ /repo", ok("cargo 1.91.0\n")],
+      ["git rev-parse --show-toplevel @ /repo", ok("/repo\n")],
+      ["git rev-parse --show-prefix @ /repo", ok("")],
+      ["git rev-parse HEAD @ /repo", ok(`${TARGET_SHA}\n`)],
+      ["git status --porcelain --untracked-files=all @ /repo", ok("")],
+      [`git cat-file -e ${BASE_SHA}^{commit} @ /repo`, ok("")],
+      [
+        `git merge-base --is-ancestor ${BASE_SHA} ${TARGET_SHA} @ /repo`,
+        ok(""),
+      ],
+      [
+        "cargo metadata --format-version 1 --no-deps @ /repo",
+        ok(JSON.stringify(targetMetadata)),
+      ],
+      [
+        "git clone --no-checkout --local /repo /tmp/reconcile/base/repository @ /repo",
+        ok(""),
+      ],
+      [
+        `git checkout --detach ${BASE_SHA} @ /tmp/reconcile/base/repository`,
+        ok(""),
+      ],
+      [
+        "cargo metadata --format-version 1 --no-deps @ /tmp/reconcile/base/repository",
+        ok(JSON.stringify(baseMetadata)),
+      ],
+    ]);
+    const ports: WorkspacePlanPorts = {
+      async run(command, args, cwd) {
+        const key = `${command} ${args.join(" ")} @ ${cwd}`;
+        const response = responses.get(key);
+        if (response === undefined)
+          throw new Error(`unexpected command: ${key}`);
+        return response;
+      },
+      async readText(file) {
+        if (file === "/repo/release.yml") {
+          return [
+            "githubRelease:",
+            "  package: example",
+            "  notesFile: CHANGELOG.md",
+            '  notesHeadingTemplate: "## example {version}"',
+          ].join("\n");
+        }
+        if (file === "/repo/CHANGELOG.md") return "# Changelog\n";
+        throw new Error(`unexpected file: ${file}`);
+      },
+      async makeTempDirectory() {
+        return "/tmp/reconcile/base";
+      },
+      async removeDirectory() {},
+    };
+
+    const result = await loadReleasePlan(
+      {
+        controllerDirectory: "/repo",
+        sourceDirectory: "/repo",
+        baseSha: BASE_SHA,
+        targetSha: TARGET_SHA,
+        configPath: "release.yml",
+      },
+      ports,
+    );
+    expect(result.plan).toEqual({
+      schemaVersion: 1,
+      source: { baseSha: BASE_SHA, targetSha: TARGET_SHA },
+      packages: [
+        {
+          name: "example",
+          version: "2.0.0",
+          manifestPath: "Cargo.toml",
+          tag: "example-v2.0.0",
+        },
+      ],
+    });
+    expect(result.githubReleaseError?.message).toBe(
+      'release notes heading "## example 2.0.0" was not found',
     );
   });
 
@@ -435,7 +521,7 @@ describe("loadReleasePlan", () => {
       async removeDirectory() {},
     };
 
-    const plan = await loadReleasePlan(
+    const { plan } = await loadReleasePlan(
       {
         controllerDirectory: "/repo",
         sourceDirectory: "/repo",

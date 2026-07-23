@@ -3,72 +3,136 @@
 [![CI](https://github.com/ZcashFoundation/cargo-release/actions/workflows/ci.yml/badge.svg)](https://github.com/ZcashFoundation/cargo-release/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Cargo Release is a GitHub Action for resumable Cargo workspace publishing to
-crates.io and GitHub Releases.
+Cargo Release makes multi-package Cargo workspace releases recoverable across
+GitHub Actions workflow reruns. It derives the intended release from 2 immutable
+commits, observes crates.io and GitHub, delegates package ordering to Cargo, and
+creates only the missing release state.
 
-Cargo 1.90 added native multi-package publishing, but a workspace publication
-is still non-atomic. One failed upload can leave some versions on crates.io,
-and retrying the original package set can then collide with versions that
-already exist. Cargo Release derives the intended release from 2 immutable
-commits, verifies crates.io and GitHub state, and creates only what is still
-missing.
+> [!TIP]
+> **Decision shortcut:** Use Cargo Release when several workspace crates must
+> publish as one logical release and a failed run must safely continue instead
+> of restarting from the beginning.
 
-This action is not specific to Zebra. It works with a single Rust package or a
-Cargo workspace in any GitHub repository that publishes to crates.io.
+The goal is a complete, verifiable release after any number of reruns. An
+already-complete release is a no-op, partial progress is preserved, and any
+published crate or tag that points at another source commit stops for human
+review.
 
-## Is this action a fit?
+## Should you use it?
 
-Use Cargo Release when:
+| Use Cargo Release when                                                                  | Prefer simpler tooling when                                                    |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Several publishable workspace crates can change together.                               | A release contains one independent crate.                                      |
+| New versions of workspace crates depend on one another.                                 | `cargo publish` or `release-plz release` already completes the whole workflow. |
+| Publication, product verification, tags, and a GitHub Release happen in separate steps. | Only crate publication is required.                                            |
+| A rerun must resume after crates.io accepted only part of the release.                  | Operators can resolve partial publication manually.                            |
+| Existing crate versions and tags must match an approved source commit.                  | Source provenance and GitHub finalization are handled elsewhere.               |
 
-- an approved commit already contains the versions that should be released;
-- the source is hosted on GitHub, and packages publish to crates.io;
-- the workflow needs to recover safely from partial workspace publication;
-- existing crate versions must be verified against the approved source commit;
-  and
-- tags and an optional GitHub Release should appear only after every crate is
-  available.
+This action is not specific to Zebra. It supports a single Rust package or one
+Cargo workspace in any GitHub repository that publishes to crates.io, although
+multi-crate workspaces receive the most benefit.
 
-For a single crate, `cargo publish` may be sufficient. Cargo Release adds the
-most value to workspaces with several publishable crates, particularly when
-releases must survive reruns or a server needs a verification gate before
-public tags and GitHub Releases.
+> [!NOTE]
+> Cargo Release supports GitHub, crates.io, Cargo 1.90 or newer, annotated Git
+> tags, and an optional product-level GitHub Release. It does not support other
+> Git forges, other Cargo registries, or multiple workspaces in one invocation.
 
-Current scope:
+## The failure model
 
-- GitHub repositories and GitHub Releases;
-- the crates.io registry;
-- Cargo 1.90 or newer;
-- one Cargo workspace per action invocation; and
-- annotated Git tags plus, optionally, one product-level GitHub Release.
+Publishing a workspace changes several independent systems: crates.io stores
+immutable crate versions, Git stores tags, and GitHub stores mutable release
+metadata. No transaction covers all 3 systems, so a workflow can stop after any
+successful write.
 
-Other Git forges and Cargo registries are not supported.
+> [!IMPORTANT]
+> Cargo can order and publish interdependent workspace crates, but publication
+> remains non-atomic. If a later upload fails, earlier crate versions remain
+> permanently published and the next run must continue from that external
+> state.
 
-## Where it fits
+Several workspace shapes can expose this problem:
 
-Cargo Release owns the post-merge publication and recovery boundary. It
-composes with existing release tools instead of replacing them.
+- **Interdependent crates:** crate `app` depends on the new version of crate
+  `core`. Validating `app` alone fails while `core` exists only in the same
+  unpublished release.
+- **Independent release groups:** several crates can publish successfully before
+  an unrelated crate fails, which leaves only part of the approved package set
+  on crates.io.
+- **Split registry and Git state:** a crate can be published without its tag, or
+  a tag can exist while its crate is still missing.
+- **Product finalization:** every crate and tag can exist while a later
+  verification step or GitHub Release creation fails.
+- **Registry propagation:** crates.io can accept an upload before every
+  observation endpoint reports it, so immediate replay can mistake progress for
+  failure.
 
-| Tool                                                                        | Responsibility                                                                                                                                   |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [release-plz](https://github.com/release-plz/release-plz)                   | Update versions and changelogs, then prepare the Release PR. Its `release` command remains a simpler option when phased recovery is unnecessary. |
-| Cargo Release                                                               | Reconstruct the approved release, verify existing crates, publish the missing set with native Cargo, then reconcile tags and release metadata.   |
-| [cargo-release CLI](https://github.com/crate-ci/cargo-release)              | Prepare and execute Cargo releases from a local or CI command. This action does not invoke or wrap the CLI.                                      |
-| [crates-io-auth-action](https://github.com/rust-lang/crates-io-auth-action) | Supply a short-lived crates.io token through trusted publishing.                                                                                 |
-| [dist](https://github.com/axodotdev/cargo-dist)                             | Build and distribute binaries or installers after the source release is complete.                                                                |
+These failure modes were observed across several release attempts in a large
+Rust workspace, with different immediate errors. They are not
+repository-specific: workspaces with shared versions, internal dependency
+edges, or separate library and application crates are especially exposed. The
+common failure is treating irreversible external writes as the output of one
+uninterrupted command.
 
-[publish-crates](https://github.com/katyo/publish-crates) is a useful alternative
-that implements its own workspace dependency checks and publication ordering.
-Cargo Release instead delegates multi-package ordering to Cargo 1.90 or newer,
-then concentrates on commit provenance, rerun safety, and GitHub finalization.
+## What Cargo solved, and what remained
 
-## How it works
+The release workflow that motivated this action used
+[release-plz 0.3.159](https://github.com/release-plz/release-plz/tree/e824efb05783b2410653757cb7659f5b22dab3c7).
+These claims are scoped to that exact version rather than current upstream
+development. Its release command iterates over packages and runs one
+`cargo publish` command for each crate. During a dry run, an `app` crate
+therefore cannot verify against the new `core` version from the same release
+unless `core` is already on the registry. The command output contains packages
+published during that invocation, not a durable description of the whole
+desired release. It also returns early when a tag exists and skips tag creation
+when a crate is already published. Those behaviors work for a successful
+uninterrupted run, but they do not cover reconciliation after partial progress.
+
+This is a boundary mismatch, not a claim that release-plz cannot publish Cargo
+workspaces. Projects that do not need cross-run recovery can continue using its
+simpler release command.
+
+[Cargo 1.90 stabilized multi-package publishing](https://doc.rust-lang.org/cargo/CHANGELOG.html#cargo-190-2025-09-18),
+including `cargo publish -p core -p app`. Cargo now builds one
+dependency-aware plan, packages selected crates in dependency order, and uses a
+temporary local registry while verifying interdependent packages. Cargo solved
+the package graph and dry-run problem, but its release notes explicitly retain
+the non-atomic failure model.
+
+Cargo Release fills the remaining controller gap. On every run, it reconstructs
+the complete desired release and asks Cargo to dry-run the complete package set.
+It then publishes only missing crates, verifies published source provenance,
+creates tags after every crate matches, and creates or repairs the optional
+GitHub Release last.
+
+| Layer                                                     | Responsibility                                                                                                |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| [release-plz](https://github.com/release-plz/release-plz) | Update versions and changelogs, then prepare the Release PR.                                                  |
+| Cargo                                                     | Resolve the selected package graph, verify packages together, and order publication.                          |
+| Cargo Release                                             | Observe desired state across runs, publish only missing crates, verify provenance, and finalize GitHub state. |
+
+<details>
+<summary>Exact source behavior behind the design</summary>
+
+- release-plz 0.3.159
+  [loops over publishable packages](https://github.com/release-plz/release-plz/blob/e824efb05783b2410653757cb7659f5b22dab3c7/crates/release_plz_core/src/command/release.rs#L579-L617),
+  [returns when a tag already exists](https://github.com/release-plz/release-plz/blob/e824efb05783b2410653757cb7659f5b22dab3c7/crates/release_plz_core/src/command/release.rs#L627-L709),
+  and [builds one `cargo publish --package` command per crate](https://github.com/release-plz/release-plz/blob/e824efb05783b2410653757cb7659f5b22dab3c7/crates/release_plz_core/src/command/release.rs#L1154-L1200).
+- Cargo 1.91
+  [builds and executes one dependency-aware publish plan](https://github.com/rust-lang/cargo/blob/ea2d97820c16195b0ca3fadb4319fe512c199a43/src/cargo/ops/registry/publish.rs#L71-L360)
+  and [packages interdependent crates against a temporary local registry](https://github.com/rust-lang/cargo/blob/ea2d97820c16195b0ca3fadb4319fe512c199a43/src/cargo/ops/cargo_package/mod.rs#L248-L359).
+- crates.io trusted credentials come from the official
+  [crates-io-auth-action](https://github.com/rust-lang/crates-io-auth-action).
+
+</details>
+
+## How a release converges
 
 ```mermaid
 flowchart LR
-    A["Base and target SHAs"] --> B["Derive Cargo release plan"]
+    A["Base and target SHAs"] --> B["Derive desired release"]
     B --> C["Observe crates.io and GitHub"]
     C --> D["Dry-run the complete package set"]
-    D --> E["Publish missing crates"]
+    D --> E["Publish only missing crates"]
     E --> F["Verify source provenance"]
     F --> G["Create annotated tags"]
     G --> H["Create or repair GitHub Release"]
@@ -76,13 +140,25 @@ flowchart LR
 
 The target commit is the desired source of truth. The action selects
 crates.io-publishable workspace packages whose versions differ between the base
-and target commits. Before writing anything, it observes every planned crate,
-tag, and optional GitHub Release.
+and target commits, then observes every planned crate, tag, and optional GitHub
+Release before writing anything.
 
 Existing crate versions count as complete only when their packaged
 `.cargo_vcs_info.json` records the target commit without a dirty source flag.
 Tags must resolve to the same target commit. Mutable GitHub Release metadata can
 be repaired, but contradictory immutable state stops the run.
+
+## Adjacent tools
+
+Cargo Release owns the post-merge publication and recovery boundary. These
+tools cover neighboring or alternative responsibilities:
+
+| Tool                                                                        | Use it for                                                                                                                  |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| [cargo-release CLI](https://github.com/crate-ci/cargo-release)              | Preparing and executing Cargo releases from a local or CI command. This action does not invoke or wrap the CLI.             |
+| [crates-io-auth-action](https://github.com/rust-lang/crates-io-auth-action) | Supplying a short-lived crates.io token through trusted publishing.                                                         |
+| [dist](https://github.com/axodotdev/cargo-dist)                             | Building and distributing binaries or installers after the source release is complete.                                      |
+| [publish-crates](https://github.com/katyo/publish-crates)                   | Publishing workspaces through its own dependency checks and ordering instead of delegating multi-package ordering to Cargo. |
 
 ## Quick start
 

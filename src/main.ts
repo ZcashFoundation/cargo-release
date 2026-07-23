@@ -43,6 +43,8 @@ async function run(): Promise<void> {
     core.getInput("config-path") || ".github/cargo-release.yml";
   const githubToken = core.getInput("github-token", { required: true });
   core.setSecret(githubToken);
+  // Cargo can execute package build scripts, which do not need this token.
+  delete process.env["INPUT_GITHUB-TOKEN"];
 
   const plan = await loadReleasePlan(
     {

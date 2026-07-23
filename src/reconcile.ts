@@ -222,9 +222,7 @@ async function checkRelease(
   ports: ReconcilePorts,
   state: ObservedReleaseState,
 ): Promise<ReconcileReport> {
-  if (missingPackages(plan, state.packages).length > 0) {
-    await ports.dryRunPackages(plan.packages);
-  }
+  await ports.dryRunPackages(plan.packages);
 
   if (
     contains(state.packages, "missing") ||
@@ -423,6 +421,8 @@ export async function reconcile(
     );
     if (publication.state === "failed") return publication.report;
     state = { ...state, packages: publication.packages };
+  } else if (phase === "publish" || phase === "all") {
+    await ports.dryRunPackages(plan.packages);
   }
 
   if (phase === "publish") return complete(state);

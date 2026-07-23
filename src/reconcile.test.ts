@@ -58,8 +58,13 @@ describe("reconcile", () => {
     >().toEqualTypeOf<true>();
   });
 
-  test("reports an already complete release without writing", async () => {
+  test("dry-runs an already complete release without writing", async () => {
     const ports = matchingPorts();
+    ports.dryRunPackages = vi.fn();
+    ports.publishPackages = vi.fn();
+    ports.createTag = vi.fn();
+    ports.createGithubRelease = vi.fn();
+
     const report = await reconcile(plan, "all", ports, { attempts: 3 });
 
     expect(report).toEqual({
@@ -67,6 +72,24 @@ describe("reconcile", () => {
       packages: [matching("example-core@1.2.3")],
       tags: [matching("example-core-v1.2.3")],
     });
+    expect(ports.dryRunPackages).toHaveBeenCalledExactlyOnceWith(plan.packages);
+    expect(ports.publishPackages).not.toHaveBeenCalled();
+    expect(ports.createTag).not.toHaveBeenCalled();
+    expect(ports.createGithubRelease).not.toHaveBeenCalled();
+  });
+
+  test("check dry-runs an already complete release", async () => {
+    const ports = matchingPorts();
+    ports.dryRunPackages = vi.fn();
+
+    await expect(
+      reconcile(plan, "check", ports, { attempts: 3 }),
+    ).resolves.toEqual({
+      state: "complete",
+      packages: [matching("example-core@1.2.3")],
+      tags: [matching("example-core-v1.2.3")],
+    });
+    expect(ports.dryRunPackages).toHaveBeenCalledExactlyOnceWith(plan.packages);
   });
 
   test("observes package archives sequentially to bound memory and registry load", async () => {

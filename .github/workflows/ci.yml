@@ -44,8 +44,13 @@ jobs:
         with:
           fail-on-severity: moderate
 
-  test:
-    name: Test
+  # Audit runs as its own job rather than as a step in `test`. npm audit
+  # consults live advisory data, so it can start failing without any change to
+  # this repository. As a step it short-circuited every later step, which once
+  # hid a stale `dist` bundle for hours. Keep it independent so the bundle check
+  # below always reports.
+  audit:
+    name: Audit
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -64,6 +69,24 @@ jobs:
 
       - name: Audit dependencies
         run: npm audit --audit-level=moderate
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Check formatting
         run: npm run format:check

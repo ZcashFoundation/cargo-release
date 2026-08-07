@@ -23,20 +23,25 @@ matching rebuilt `dist/` (run `npm run build` locally before pushing).
 
 ## Release steps
 
-1. Confirm the target commit is on `main` with all CI workflows green,
+1. Bump `version` in `package.json` to the release version (without the `v`
+   prefix, so `v0.1.0` means `"version": "0.1.0"`) and land that change on
+   `main` first. The package is never published to npm, so this field is only a
+   record of which release a commit belongs to — but it should agree with the
+   tag. Nothing in `src/` reads it, so the `dist/` bundle does not change.
+2. Confirm the target commit is on `main` with all CI workflows green,
    including "Attest bundled action".
-2. From a clean checkout of the target commit, verify the attestation:
+3. From a clean checkout of the target commit, verify the attestation:
 
    ```sh
    gh attestation verify dist/index.js --repo ZcashFoundation/cargo-release
    ```
 
-3. Run the "Release" workflow (`workflow_dispatch` on `main`) with the version
+4. Run the "Release" workflow (`workflow_dispatch` on `main`) with the version
    input in `vMAJOR.MINOR.PATCH` form. The workflow validates the version
    format, re-checks that `dist/` is reproducible from `src/`, creates an
    annotated tag pointing at the release commit, and publishes a GitHub
    Release with generated notes.
-4. Announce the released full commit SHA. Consumers pin that SHA, not the tag
+5. Announce the released full commit SHA. Consumers pin that SHA, not the tag
    (see `SECURITY.md`).
 
 ## Version policy

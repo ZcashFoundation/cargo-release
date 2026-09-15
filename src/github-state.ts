@@ -1,6 +1,12 @@
+import { gte as semverGte, prerelease as semverPrerelease } from "semver";
+
 import { errorMessage } from "./errors.js";
 import type { Observation } from "./reconcile.js";
-import type { GithubRelease, ReleasePackage } from "./release-plan.js";
+import {
+  parseReleaseTagVersion,
+  type GithubRelease,
+  type ReleasePackage,
+} from "./release-plan.js";
 
 const MAX_TAG_DEPTH = 8;
 
@@ -41,7 +47,7 @@ export interface CreateReleaseInput {
   readonly body: string;
   readonly prerelease: boolean;
   readonly draft: false;
-  readonly makeLatest: "true" | "false" | "legacy";
+  readonly makeLatest: "true" | "false";
 }
 
 export interface UpdateReleaseInput {
@@ -51,7 +57,7 @@ export interface UpdateReleaseInput {
   readonly body: string;
   readonly prerelease: boolean;
   readonly draft: false;
-  readonly makeLatest: "true" | "false" | "legacy";
+  readonly makeLatest: "true" | "false";
 }
 
 export interface GithubApi {
@@ -63,6 +69,7 @@ export interface GithubApi {
   createRef(input: CreateRefInput): Promise<void>;
   getReleaseByTag(tag: string): Promise<GithubReleaseRecord>;
   getLatestRelease(): Promise<GithubLatestRelease | undefined>;
+  listReleases(): Promise<readonly GithubReleaseRecord[]>;
   createRelease(input: CreateReleaseInput): Promise<void>;
   updateRelease(input: UpdateReleaseInput): Promise<void>;
 }
@@ -182,8 +189,20 @@ export class GithubState {
       };
     }
 
-    if (release.prerelease || release.makeLatest === "auto") {
+    if (release.prerelease) {
       return { state: "matching", subject };
+    }
+
+    let shouldBeLatest: boolean;
+    try {
+      shouldBeLatest = (await this.selectMakeLatest(release)) === "true";
+    } catch (error: unknown) {
+      return errorObservation(
+        subject,
+        "GitHub Release history observation failed",
+        error,
+        false,
+      );
     }
 
     let latest: GithubLatestRelease | undefined;
@@ -198,7 +217,6 @@ export class GithubState {
       );
     }
     const isLatest = latest?.id === actual.id;
-    const shouldBeLatest = release.makeLatest === "true";
     return isLatest === shouldBeLatest
       ? { state: "matching", subject }
       : {
@@ -218,7 +236,7 @@ export class GithubState {
       body: release.notes,
       prerelease: release.prerelease,
       draft: false,
-      makeLatest: githubMakeLatest(release),
+      makeLatest: await this.selectMakeLatest(release),
     });
   }
 
@@ -237,13 +255,34 @@ export class GithubState {
       body: release.notes,
       prerelease: release.prerelease,
       draft: false,
-      makeLatest: githubMakeLatest(release),
+      makeLatest: await this.selectMakeLatest(release),
     });
   }
-}
 
-function githubMakeLatest(release: GithubRelease): "true" | "false" | "legacy" {
-  return release.makeLatest === "auto" ? "legacy" : release.makeLatest;
+  private async selectMakeLatest(
+    release: GithubRelease,
+  ): Promise<"true" | "false"> {
+    if (release.makeLatest !== undefined) return release.makeLatest;
+    if (release.prerelease || semverPrerelease(release.version) !== null) {
+      return "false";
+    }
+
+    const published = await this.api.listReleases();
+    const versions = published.flatMap((candidate) => {
+      if (candidate.draft || candidate.prerelease) return [];
+      // Skipping its own tag keeps a rerun's selection identical.
+      if (candidate.tagName === release.tag) return [];
+      const version = parseReleaseTagVersion(
+        release.tagTemplate,
+        release.package,
+        candidate.tagName,
+      );
+      return version === undefined ? [] : [version];
+    });
+    return versions.every((version) => semverGte(release.version, version))
+      ? "true"
+      : "false";
+  }
 }
 
 function statusOf(error: unknown): number | undefined {

@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 
 import {
   deriveReleasePlan,
+  parseReleaseTagVersion,
   type CargoMetadataSnapshot,
 } from "./release-plan.js";
 
@@ -258,11 +259,13 @@ describe("deriveReleasePlan", () => {
     });
 
     expect(plan.githubRelease).toEqual({
+      package: "example-cli",
+      version: "2.0.0-rc.1",
       tag: "example-cli-v2.0.0-rc.1",
+      tagTemplate: "{name}-v{version}",
       name: "Example CLI 2.0.0-rc.1",
       notes: "## Changes\n\n- First candidate\n",
       prerelease: true,
-      makeLatest: "auto",
     });
   });
 
@@ -412,5 +415,18 @@ describe("deriveReleasePlan", () => {
         config: { tagTemplate: "{unknown}-{version}" },
       }),
     ).toThrow('template contains unsupported placeholder "{unknown}"');
+  });
+});
+
+describe("parseReleaseTagVersion", () => {
+  test.each([
+    ["{name}-v{version}", "example-cli-v6.10.0", "6.10.0"],
+    ["v{version}", "v6.3.1", "6.3.1"],
+    ["v{version}-final", "v6.3.1-final", "6.3.1"],
+    ["{name}-v{version}", "other-crate-v6.3.1", undefined],
+    ["{name}-v{version}", "example-cli-vnightly", undefined],
+    ["{name}-release", "example-cli-release", undefined],
+  ] as const)("reads %s from tag %s", (template, tag, expected) => {
+    expect(parseReleaseTagVersion(template, "example-cli", tag)).toBe(expected);
   });
 });

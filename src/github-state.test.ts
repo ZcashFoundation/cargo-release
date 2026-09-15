@@ -4,8 +4,9 @@ import {
   GithubState,
   type GithubApi,
   type GithubObject,
+  type GithubReleaseRecord,
 } from "./github-state.js";
-import type { ReleasePackage } from "./release-plan.js";
+import type { GithubRelease, ReleasePackage } from "./release-plan.js";
 
 const targetSha = "2".repeat(40);
 const item: ReleasePackage = {
@@ -14,12 +15,14 @@ const item: ReleasePackage = {
   manifestPath: "crates/example-core/Cargo.toml",
   tag: "example-core-v1.2.3",
 };
-const release = {
+const release: GithubRelease = {
+  package: item.name,
+  version: item.version,
   tag: item.tag,
+  tagTemplate: "{name}-v{version}",
   name: "Example 1.2.3",
   notes: "Release notes",
   prerelease: false,
-  makeLatest: "auto" as const,
 };
 
 function api(overrides: Partial<GithubApi> = {}): GithubApi {
@@ -37,8 +40,26 @@ function api(overrides: Partial<GithubApi> = {}): GithubApi {
       draft: false,
     })),
     getLatestRelease: vi.fn(async () => ({ id: 42 })),
+    listReleases: vi.fn(
+      async (): Promise<readonly GithubReleaseRecord[]> => [],
+    ),
     createRelease: vi.fn(async () => undefined),
     updateRelease: vi.fn(async () => undefined),
+    ...overrides,
+  };
+}
+
+function published(
+  tagName: string,
+  overrides: Partial<GithubReleaseRecord> = {},
+): GithubReleaseRecord {
+  return {
+    id: 7,
+    tagName,
+    name: tagName,
+    body: null,
+    prerelease: false,
+    draft: false,
     ...overrides,
   };
 }
@@ -284,15 +305,56 @@ describe("GithubState", () => {
     },
   );
 
-  test("does not invent a readable latest invariant for auto mode", async () => {
-    const getLatestRelease = vi.fn(async () => ({ id: 7 }));
-    const state = new GithubState(api({ getLatestRelease }), targetSha);
+  test("observes a selected latest release against the published history", async () => {
+    const state = new GithubState(
+      api({
+        getLatestRelease: vi.fn(async () => ({ id: 7 })),
+        listReleases: vi.fn(async () => [published("example-core-v1.2.2")]),
+      }),
+      targetSha,
+    );
 
     await expect(state.observeGithubRelease(release)).resolves.toEqual({
-      state: "matching",
+      state: "repairable",
       subject: item.tag,
+      detail: "GitHub Release latest state differs: expected latest",
     });
-    expect(getLatestRelease).not.toHaveBeenCalled();
+  });
+
+  test("leaves the latest release untouched for a prerelease", async () => {
+    const client = api({
+      getReleaseByTag: vi.fn(async () => ({
+        id: 42,
+        tagName: item.tag,
+        name: release.name,
+        body: release.notes,
+        prerelease: true,
+        draft: false,
+      })),
+    });
+    const state = new GithubState(client, targetSha);
+
+    await expect(
+      state.observeGithubRelease({ ...release, prerelease: true }),
+    ).resolves.toEqual({ state: "matching", subject: item.tag });
+    expect(client.listReleases).not.toHaveBeenCalled();
+    expect(client.getLatestRelease).not.toHaveBeenCalled();
+  });
+
+  test("classifies a failed release history observation", async () => {
+    const state = new GithubState(
+      api({
+        listReleases: vi.fn(async () =>
+          Promise.reject({ status: 503, message: "unavailable" }),
+        ),
+      }),
+      targetSha,
+    );
+
+    await expect(state.observeGithubRelease(release)).resolves.toMatchObject({
+      state: "transient",
+      detail: "GitHub Release history observation failed: unavailable",
+    });
   });
 
   test("classifies failures while observing explicit latest state", async () => {
@@ -436,7 +498,7 @@ describe("GithubState", () => {
     });
   });
 
-  test("creates a public release at the target commit with automatic latest semantics", async () => {
+  test("creates a public release at the target commit", async () => {
     const client = api();
     const state = new GithubState(client, targetSha);
 
@@ -449,9 +511,77 @@ describe("GithubState", () => {
       body: release.notes,
       prerelease: false,
       draft: false,
-      makeLatest: "legacy",
+      makeLatest: "true",
     });
   });
+
+  test.each([
+    ["no release exists yet", "1.2.3", [], "true"],
+    [
+      "the version is above every published version",
+      "1.2.3",
+      [published("example-core-v1.0.0"), published("example-core-v1.2.2")],
+      "true",
+    ],
+    [
+      "a newer major version is already published",
+      "6.3.1",
+      [published("example-core-v6.3.0"), published("example-core-v7.0.0")],
+      "false",
+    ],
+    [
+      "the version leads its own line and every other line",
+      "6.3.1",
+      [published("example-core-v6.3.0")],
+      "true",
+    ],
+    [
+      "the version is already published",
+      "6.3.1",
+      [published("example-core-v6.3.0"), published("example-core-v6.3.1")],
+      "true",
+    ],
+    [
+      "the version is a prerelease",
+      "7.0.0-rc.1",
+      [published("example-core-v6.3.1")],
+      "false",
+    ],
+    [
+      "published prereleases and foreign tags surround the version",
+      "6.3.1",
+      [
+        published("example-core-v7.0.0-rc.1", { prerelease: true }),
+        published("example-core-v8.0.0", { draft: true }),
+        published("other-crate-v9.0.0"),
+        published("v10.0.0"),
+        published("example-core-v6.3.0"),
+      ],
+      "true",
+    ],
+    [
+      "the version has a two-digit component",
+      "6.10.0",
+      [published("example-core-v6.9.0")],
+      "true",
+    ],
+  ] as const)(
+    "selects the latest release flag when %s",
+    async (_case, version, releases, expected) => {
+      const client = api({ listReleases: vi.fn(async () => releases) });
+      const state = new GithubState(client, targetSha);
+
+      await state.createGithubRelease({
+        ...release,
+        version,
+        tag: `example-core-v${version}`,
+      });
+
+      expect(client.createRelease).toHaveBeenCalledWith(
+        expect.objectContaining({ makeLatest: expected }),
+      );
+    },
+  );
 
   test.each(["true", "false"] as const)(
     "passes through explicit make_latest=%s semantics",
@@ -480,7 +610,7 @@ describe("GithubState", () => {
       body: release.notes,
       prerelease: false,
       draft: false,
-      makeLatest: "legacy",
+      makeLatest: "true",
     });
   });
 

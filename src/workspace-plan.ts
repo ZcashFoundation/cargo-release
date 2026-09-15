@@ -226,7 +226,7 @@ export function parseReleasePlanConfig(source: string): ReleasePlanConfig {
       notesFile: string;
       notesHeadingTemplate?: string;
       prerelease?: boolean;
-      makeLatest?: "auto" | "true" | "false";
+      makeLatest?: "true" | "false";
     };
   } = {};
 
@@ -373,23 +373,12 @@ function requireBoolean(value: unknown, label: string): boolean {
   return value;
 }
 
-function requireEnum<const T extends readonly string[]>(
-  value: unknown,
-  allowed: T,
-  label: string,
-): T[number] {
-  if (typeof value !== "string" || !allowed.includes(value)) {
-    throw new Error(`${label} must be one of ${allowed.join(", ")}`);
-  }
-  return value;
-}
-
-function requireMakeLatest(
-  value: unknown,
-  label: string,
-): "auto" | "true" | "false" {
+function requireMakeLatest(value: unknown, label: string): "true" | "false" {
   if (typeof value === "boolean") return value ? "true" : "false";
-  return requireEnum(value, ["auto", "true", "false"] as const, label);
+  if (value === "true" || value === "false") return value;
+  throw new Error(
+    `${label} must be true or false; omit it to mark the release latest only when it is the highest published stable version`,
+  );
 }
 
 function requireNotes(source: string): string {

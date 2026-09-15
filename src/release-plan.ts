@@ -26,7 +26,7 @@ export interface GithubReleaseConfig {
   readonly notesFile?: string;
   readonly notesHeadingTemplate?: string;
   readonly prerelease?: boolean;
-  readonly makeLatest?: "auto" | "true" | "false";
+  readonly makeLatest?: "true" | "false";
 }
 
 export interface ReleasePlanConfig {
@@ -43,11 +43,14 @@ export interface ReleasePackage {
 }
 
 export interface GithubRelease {
+  readonly package: string;
+  readonly version: string;
   readonly tag: string;
+  readonly tagTemplate: string;
   readonly name: string;
   readonly notes: string;
   readonly prerelease: boolean;
-  readonly makeLatest: "auto" | "true" | "false";
+  readonly makeLatest?: "true" | "false";
 }
 
 export interface ReleasePlan {
@@ -75,6 +78,8 @@ interface ReleaseSelection {
 }
 
 const DEFAULT_TAG_TEMPLATE = "{name}-v{version}";
+const NAME_PLACEHOLDER = "{name}";
+const VERSION_PLACEHOLDER = "{version}";
 const FULL_COMMIT_SHA = /^[0-9a-f]{40}$/i;
 const FORBIDDEN_REF_CHARACTERS = new Set([
   "~",
@@ -106,12 +111,7 @@ export function deriveReleasePlan({
       name: item.name,
       version: item.version,
       manifestPath: relativeManifestPath(targetMetadata, item, "target"),
-      tag: renderReleaseTemplate(
-        config.packageOverrides?.[item.name]?.tagTemplate ??
-          config.tagTemplate ??
-          DEFAULT_TAG_TEMPLATE,
-        item,
-      ),
+      tag: renderReleaseTemplate(tagTemplateFor(config, item.name), item),
     }))
     .sort((left, right) =>
       left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
@@ -241,7 +241,7 @@ function deriveGithubRelease(
   }
   const prerelease =
     config.githubRelease.prerelease ?? semverPrerelease(item.version) !== null;
-  const makeLatest = config.githubRelease.makeLatest ?? "auto";
+  const makeLatest = config.githubRelease.makeLatest;
   if (prerelease && makeLatest === "true") {
     throw new Error(
       'githubRelease.makeLatest cannot be "true" for a prerelease',
@@ -249,15 +249,26 @@ function deriveGithubRelease(
   }
 
   return {
+    package: item.name,
+    version: item.version,
     tag: item.tag,
+    tagTemplate: tagTemplateFor(config, item.name),
     name: renderReleaseTemplate(
       config.githubRelease.nameTemplate ?? "{name} {version}",
       item,
     ),
     notes,
     prerelease,
-    makeLatest,
+    ...(makeLatest === undefined ? {} : { makeLatest }),
   };
+}
+
+function tagTemplateFor(config: ReleasePlanConfig, name: string): string {
+  return (
+    config.packageOverrides?.[name]?.tagTemplate ??
+    config.tagTemplate ??
+    DEFAULT_TAG_TEMPLATE
+  );
 }
 
 function getWorkspacePackages(
@@ -390,13 +401,29 @@ function isCratesIoPublishable(item: CargoPackageSnapshot): boolean {
   );
 }
 
+export function parseReleaseTagVersion(
+  template: string,
+  name: string,
+  tag: string,
+): string | undefined {
+  const [prefix, suffix, ...rest] = template.split(VERSION_PLACEHOLDER);
+  if (prefix === undefined || suffix === undefined || rest.length > 0) {
+    return undefined;
+  }
+  const start = prefix.replaceAll(NAME_PLACEHOLDER, name);
+  const end = suffix.replaceAll(NAME_PLACEHOLDER, name);
+  if (!tag.startsWith(start) || !tag.endsWith(end)) return undefined;
+  const version = tag.slice(start.length, tag.length - end.length);
+  return validSemver(version) ?? undefined;
+}
+
 export function renderReleaseTemplate(
   template: string,
   item: Pick<CargoPackageSnapshot, "name" | "version">,
 ): string {
   const rendered = template
-    .replaceAll("{name}", item.name)
-    .replaceAll("{version}", item.version);
+    .replaceAll(NAME_PLACEHOLDER, item.name)
+    .replaceAll(VERSION_PLACEHOLDER, item.version);
   const unsupported = /\{[^{}]+\}/.exec(rendered)?.[0];
   if (unsupported !== undefined) {
     throw new Error(

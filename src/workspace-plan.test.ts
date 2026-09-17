@@ -43,6 +43,20 @@ githubRelease:
     );
   });
 
+  it("parses the opt-in finalize policy and rejects unknown keys", () => {
+    expect(
+      parseReleasePlanConfig("finalize:\n  allowMissingCrates: true\n"),
+    ).toEqual({ finalize: { allowMissingCrates: true } });
+
+    expect(() =>
+      parseReleasePlanConfig("finalize:\n  allowMissingTags: true\n"),
+    ).toThrow('finalize contains unknown key "allowMissingTags"');
+
+    expect(() =>
+      parseReleasePlanConfig("finalize:\n  allowMissingCrates: yes please\n"),
+    ).toThrow("finalize.allowMissingCrates must be a boolean");
+  });
+
   it("requires a notes file when a GitHub Release is configured", () => {
     expect(() =>
       parseReleasePlanConfig("githubRelease:\n  package: zebrad\n"),
@@ -238,7 +252,13 @@ describe("loadReleasePlan", () => {
       },
       async readText(file) {
         if (file === "/repo/controller/release.yml") {
-          return "githubRelease:\n  package: example\n  notesFile: CHANGELOG.md\n";
+          return [
+            "githubRelease:",
+            "  package: example",
+            "  notesFile: CHANGELOG.md",
+            "finalize:",
+            "  allowMissingCrates: true",
+          ].join("\n");
         }
         if (file === "/repo/workspace/CHANGELOG.md") return "Release notes.\n";
         throw new Error(`unexpected file: ${file}`);
@@ -268,6 +288,7 @@ describe("loadReleasePlan", () => {
         packages: [{ name: "example", version: "2.0.0" }],
         githubRelease: { notes: "Release notes." },
       },
+      policy: { finalize: { allowMissingCrates: true } },
     });
     expect(removed).toBe("/tmp/reconcile/base");
     expect(calls).toContain(

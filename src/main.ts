@@ -20,6 +20,7 @@ import {
 } from "./github-state.js";
 import {
   reconcile,
+  type IncompleteReport,
   type Observation,
   type Phase,
   type ReconcilePorts,
@@ -50,7 +51,7 @@ async function run(): Promise<void> {
   // Cargo can execute package build scripts, which do not need this token.
   delete process.env["INPUT_GITHUB-TOKEN"];
 
-  const { plan, githubReleaseError } = await loadReleasePlan(
+  const { plan, policy, githubReleaseError } = await loadReleasePlan(
     {
       controllerDirectory: process.cwd(),
       sourceDirectory,
@@ -115,7 +116,7 @@ async function run(): Promise<void> {
 
   let report: ReconcileReport;
   try {
-    report = await reconcile(plan, phase, ports, { attempts });
+    report = await reconcile(plan, phase, ports, { attempts, policy });
   } catch (error: unknown) {
     if (githubReleaseError === undefined) throw error;
     throw new Error(
@@ -140,13 +141,7 @@ function reportFailureMessages(
   phase: Phase,
 ): string[] {
   if (report.state === "complete") return [];
-  if (
-    phase === "check" &&
-    report.reason === "incomplete" &&
-    report.operationError === undefined
-  ) {
-    return [];
-  }
+  if (report.state === "incomplete" && stepSucceeds(report, phase)) return [];
 
   const observations: Observation[] = [
     ...report.packages,
@@ -168,7 +163,17 @@ function reportFailureMessages(
     report.operationError === undefined
       ? ""
       : `; operation failed: ${report.operationError}`;
-  return [`release reconciliation ${report.reason}: ${details}${operation}`];
+  const reason = report.state === "failed" ? report.reason : report.state;
+  return [`release reconciliation ${reason}: ${details}${operation}`];
+}
+
+function stepSucceeds(report: IncompleteReport, phase: Phase): boolean {
+  if (report.operationError !== undefined) return false;
+  if (phase === "check") return true;
+  return (
+    (phase === "finalize" || phase === "all") &&
+    report.policy.finalize.allowMissingCrates
+  );
 }
 
 function workspacePlanPorts(): WorkspacePlanPorts {

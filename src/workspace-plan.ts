@@ -12,12 +12,19 @@ import {
   type CargoMetadataSnapshot,
   type ReleasePlan,
   type ReleasePlanConfig,
+  type ReleasePolicy,
 } from "./release-plan.js";
 
 type JsonObject = Record<string, unknown>;
 
-const ROOT_KEYS = new Set(["tagTemplate", "packageOverrides", "githubRelease"]);
+const ROOT_KEYS = new Set([
+  "tagTemplate",
+  "packageOverrides",
+  "githubRelease",
+  "finalize",
+]);
 const OVERRIDE_KEYS = new Set(["tagTemplate"]);
+const FINALIZE_KEYS = new Set(["allowMissingCrates"]);
 const GITHUB_RELEASE_KEYS = new Set([
   "package",
   "nameTemplate",
@@ -54,6 +61,7 @@ export interface LoadReleasePlanOptions {
 
 export interface LoadReleasePlanResult {
   readonly plan: ReleasePlan;
+  readonly policy: ReleasePolicy;
   readonly githubReleaseError?: Error;
 }
 
@@ -186,6 +194,12 @@ export async function loadReleasePlan(
     );
   }
 
+  const policy: ReleasePolicy = {
+    finalize: {
+      allowMissingCrates: config.finalize?.allowMissingCrates ?? false,
+    },
+  };
+
   try {
     const notes = await loadNotes(
       ports,
@@ -203,10 +217,12 @@ export async function loadReleasePlan(
         config,
         ...(notes === undefined ? {} : { notes }),
       }),
+      policy,
     };
   } catch (error: unknown) {
     return {
       plan: packagePlan,
+      policy,
       githubReleaseError: asError(error),
     };
   }
@@ -220,6 +236,7 @@ export function parseReleasePlanConfig(source: string): ReleasePlanConfig {
   const config: {
     tagTemplate?: string;
     packageOverrides?: Record<string, { tagTemplate?: string }>;
+    finalize?: { allowMissingCrates?: boolean };
     githubRelease?: {
       package: string;
       nameTemplate?: string;
@@ -253,6 +270,20 @@ export function parseReleasePlanConfig(source: string): ReleasePlanConfig {
         ];
       }),
     );
+  }
+
+  if (root.finalize !== undefined) {
+    const finalize = requireObject(root.finalize, "finalize");
+    rejectUnknownKeys(finalize, FINALIZE_KEYS, "finalize");
+    config.finalize =
+      finalize.allowMissingCrates === undefined
+        ? {}
+        : {
+            allowMissingCrates: requireBoolean(
+              finalize.allowMissingCrates,
+              "finalize.allowMissingCrates",
+            ),
+          };
   }
 
   if (root.githubRelease !== undefined) {

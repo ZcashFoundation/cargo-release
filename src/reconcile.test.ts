@@ -2,11 +2,15 @@ import { describe, expect, expectTypeOf, test, vi } from "vitest";
 
 import {
   reconcile,
+  type ComponentStatus,
   type FailedReport,
   type GithubRelease,
   type Observation,
   type ReconcilePorts,
+  type ReconcileReport,
   type ReleasePlan,
+  type ReleasePolicy,
+  type ReleaseStatus,
 } from "./reconcile.js";
 
 const plan: ReleasePlan = {
@@ -35,10 +39,86 @@ const productRelease: GithubRelease = {
   prerelease: false,
   makeLatest: "true",
 };
+const defaultPolicy: ReleasePolicy = {
+  finalize: { allowMissingCrates: false },
+};
+const tagFirstPolicy: ReleasePolicy = {
+  finalize: { allowMissingCrates: true },
+};
 
 function matching(subject: string): Observation {
   return { state: "matching", subject };
 }
+
+function status(
+  crates: ComponentStatus,
+  tags: ComponentStatus,
+  pendingCrates: readonly string[] = [],
+): ReleaseStatus {
+  return { crates, tags, pendingCrates };
+}
+
+function statusWithRelease(
+  crates: ComponentStatus,
+  tags: ComponentStatus,
+  githubRelease: ComponentStatus,
+  pendingCrates: readonly string[] = [],
+): ReleaseStatus {
+  return { crates, tags, githubRelease, pendingCrates };
+}
+
+function releaseWorld(): {
+  crates: Set<string>;
+  tags: Set<string>;
+  releases: Set<string>;
+  ports: ReconcilePorts;
+} {
+  const crates = new Set<string>();
+  const tags = new Set<string>();
+  const releases = new Set<string>();
+  const ports: ReconcilePorts = {
+    observePackage: async (item) => {
+      const subject = `${item.name}@${item.version}`;
+      return crates.has(subject)
+        ? matching(subject)
+        : { state: "missing", subject };
+    },
+    dryRunPackages: async () => undefined,
+    publishPackages: async (items) => {
+      for (const item of items) crates.add(`${item.name}@${item.version}`);
+    },
+    observeTag: async (item) =>
+      tags.has(item.tag)
+        ? matching(item.tag)
+        : { state: "missing", subject: item.tag },
+    createTag: async (item) => {
+      tags.add(item.tag);
+    },
+    observeGithubRelease: async (release) =>
+      releases.has(release.tag)
+        ? matching(release.tag)
+        : { state: "missing", subject: release.tag },
+    createGithubRelease: async (release) => {
+      releases.add(release.tag);
+    },
+    updateGithubRelease: async () => undefined,
+    wait: async () => undefined,
+  };
+  return { crates, tags, releases, ports };
+}
+
+const twoPackagePlan: ReleasePlan = {
+  ...plan,
+  packages: [
+    ...plan.packages,
+    {
+      name: "example-cli",
+      version: "1.2.3",
+      manifestPath: "crates/example-cli/Cargo.toml",
+      tag: "example-cli-v1.2.3",
+    },
+  ],
+};
 
 function matchingPorts(): ReconcilePorts {
   return {
@@ -59,14 +139,14 @@ function matchingPorts(): ReconcilePorts {
 
 describe("reconcile", () => {
   test("ties failure reasons to their retry contract", () => {
+    expectTypeOf<FailedReport["reason"]>().toEqualTypeOf<
+      "conflict" | "transient"
+    >();
     expectTypeOf<
       Extract<FailedReport, { reason: "conflict" }>["retryable"]
     >().toEqualTypeOf<false>();
     expectTypeOf<
       Extract<FailedReport, { reason: "transient" }>["retryable"]
-    >().toEqualTypeOf<true>();
-    expectTypeOf<
-      Extract<FailedReport, { reason: "incomplete" }>["retryable"]
     >().toEqualTypeOf<true>();
   });
 
@@ -81,6 +161,8 @@ describe("reconcile", () => {
 
     expect(report).toEqual({
       state: "complete",
+      policy: defaultPolicy,
+      status: status("complete", "complete"),
       packages: [matching("example-core@1.2.3")],
       tags: [matching("example-core-v1.2.3")],
     });
@@ -98,6 +180,8 @@ describe("reconcile", () => {
       reconcile(plan, "check", ports, { attempts: 3 }),
     ).resolves.toEqual({
       state: "complete",
+      policy: defaultPolicy,
+      status: status("complete", "complete"),
       packages: [matching("example-core@1.2.3")],
       tags: [matching("example-core-v1.2.3")],
     });
@@ -105,18 +189,6 @@ describe("reconcile", () => {
   });
 
   test("observes package archives sequentially to bound memory and registry load", async () => {
-    const twoPackagePlan: ReleasePlan = {
-      ...plan,
-      packages: [
-        ...plan.packages,
-        {
-          name: "example-cli",
-          version: "1.2.3",
-          manifestPath: "crates/example-cli/Cargo.toml",
-          tag: "example-cli-v1.2.3",
-        },
-      ],
-    };
     const ports = matchingPorts();
     let active = 0;
     let maximumActive = 0;
@@ -150,6 +222,8 @@ describe("reconcile", () => {
       reconcile(plan, "all", ports, { attempts: 3 }),
     ).resolves.toEqual({
       state: "failed",
+      policy: defaultPolicy,
+      status: status("conflict", "complete"),
       reason: "conflict",
       retryable: false,
       packages: [
@@ -208,7 +282,7 @@ describe("reconcile", () => {
 
     await expect(
       reconcile(plan, "check", ports, { attempts: 1 }),
-    ).resolves.toMatchObject({ state: "failed", reason: "incomplete" });
+    ).resolves.toMatchObject({ state: "incomplete", retryable: true });
     expect(ports.dryRunPackages).toHaveBeenCalledExactlyOnceWith(plan.packages);
     expect(ports.publishPackages).not.toHaveBeenCalled();
   });
@@ -225,6 +299,8 @@ describe("reconcile", () => {
       reconcile(plan, "check", ports, { attempts: 3 }),
     ).resolves.toEqual({
       state: "failed",
+      policy: defaultPolicy,
+      status: status("incomplete", "complete"),
       reason: "transient",
       retryable: true,
       packages: [
@@ -250,9 +326,10 @@ describe("reconcile", () => {
     await expect(
       reconcile(plan, "check", ports, { attempts: 3 }),
     ).resolves.toEqual({
-      state: "failed",
-      reason: "incomplete",
+      state: "incomplete",
       retryable: true,
+      policy: defaultPolicy,
+      status: status("complete", "incomplete"),
       packages: [matching("example-core@1.2.3")],
       tags: [{ state: "missing", subject: "example-core-v1.2.3" }],
     });
@@ -262,18 +339,6 @@ describe("reconcile", () => {
   });
 
   test("dry-runs the complete set and publishes only missing packages", async () => {
-    const twoPackagePlan: ReleasePlan = {
-      ...plan,
-      packages: [
-        ...plan.packages,
-        {
-          name: "example-cli",
-          version: "1.2.3",
-          manifestPath: "crates/example-cli/Cargo.toml",
-          tag: "example-cli-v1.2.3",
-        },
-      ],
-    };
     const ports = matchingPorts();
     const observations = [
       { state: "missing" as const, subject: "example-core@1.2.3" },
@@ -295,6 +360,8 @@ describe("reconcile", () => {
       reconcile(twoPackagePlan, "publish", ports, { attempts: 2 }),
     ).resolves.toEqual({
       state: "complete",
+      policy: defaultPolicy,
+      status: status("complete", "complete"),
       packages: [matching("example-core@1.2.3"), matching("example-cli@1.2.3")],
       tags: [matching("example-core-v1.2.3"), matching("example-cli-v1.2.3")],
     });
@@ -321,9 +388,10 @@ describe("reconcile", () => {
     await expect(
       reconcile(plan, "finalize", ports, { attempts: 3 }),
     ).resolves.toEqual({
-      state: "failed",
-      reason: "incomplete",
+      state: "incomplete",
       retryable: true,
+      policy: defaultPolicy,
+      status: status("incomplete", "complete", ["example-core@1.2.3"]),
       packages: [{ state: "missing", subject: "example-core@1.2.3" }],
       tags: [matching("example-core-v1.2.3")],
     });
@@ -369,6 +437,8 @@ describe("reconcile", () => {
       reconcile(releasePlan, "finalize", ports, { attempts: 3 }),
     ).resolves.toEqual({
       state: "complete",
+      policy: defaultPolicy,
+      status: statusWithRelease("complete", "complete", "complete"),
       packages: [matching("example-core@1.2.3")],
       tags: [matching("example-core-v1.2.3")],
       githubRelease: matching("v1.2.3"),
@@ -402,24 +472,14 @@ describe("reconcile", () => {
       reconcile(plan, "finalize", ports, { attempts: 1 }),
     ).resolves.toEqual({
       state: "complete",
+      policy: defaultPolicy,
+      status: status("complete", "complete"),
       packages: [matching("example-core@1.2.3")],
       tags: [matching("example-core-v1.2.3")],
     });
   });
 
   test("stops tag creation when a concurrent tag conflicts", async () => {
-    const twoPackagePlan: ReleasePlan = {
-      ...plan,
-      packages: [
-        ...plan.packages,
-        {
-          name: "example-cli",
-          version: "1.2.3",
-          manifestPath: "crates/example-cli/Cargo.toml",
-          tag: "example-cli-v1.2.3",
-        },
-      ],
-    };
     const ports = matchingPorts();
     let observations = 0;
     ports.observeTag = vi.fn(async (item): Promise<Observation> => {
@@ -448,6 +508,51 @@ describe("reconcile", () => {
     );
   });
 
+  test("reports a created tag that stays unobservable as transient", async () => {
+    const ports = matchingPorts();
+    ports.observeTag = async (item) => ({
+      state: "missing",
+      subject: item.tag,
+    });
+    ports.createTag = vi.fn(async () => undefined);
+
+    await expect(
+      reconcile(plan, "finalize", ports, { attempts: 1 }),
+    ).resolves.toEqual({
+      state: "failed",
+      reason: "transient",
+      retryable: true,
+      policy: defaultPolicy,
+      status: status("complete", "incomplete"),
+      packages: [matching("example-core@1.2.3")],
+      tags: [{ state: "missing", subject: "example-core-v1.2.3" }],
+    });
+    expect(ports.createTag).toHaveBeenCalledOnce();
+  });
+
+  test("reports a created GitHub Release that stays unobservable as transient", async () => {
+    const releasePlan: ReleasePlan = {
+      ...plan,
+      githubRelease: productRelease,
+    };
+    const ports = matchingPorts();
+    ports.createGithubRelease = vi.fn(async () => undefined);
+
+    await expect(
+      reconcile(releasePlan, "finalize", ports, { attempts: 1 }),
+    ).resolves.toEqual({
+      state: "failed",
+      reason: "transient",
+      retryable: true,
+      policy: defaultPolicy,
+      status: statusWithRelease("complete", "complete", "incomplete"),
+      packages: [matching("example-core@1.2.3")],
+      tags: [matching("example-core-v1.2.3")],
+      githubRelease: { state: "missing", subject: "v1.2.3" },
+    });
+    expect(ports.createGithubRelease).toHaveBeenCalledOnce();
+  });
+
   test("polls after one publish without resubmitting packages during registry lag", async () => {
     const ports = matchingPorts();
     ports.observePackage = async (item) => ({
@@ -461,9 +566,10 @@ describe("reconcile", () => {
     await expect(
       reconcile(plan, "publish", ports, { attempts: 2 }),
     ).resolves.toEqual({
-      state: "failed",
-      reason: "incomplete",
+      state: "incomplete",
       retryable: true,
+      policy: defaultPolicy,
+      status: status("incomplete", "complete", ["example-core@1.2.3"]),
       packages: [{ state: "missing", subject: "example-core@1.2.3" }],
       tags: [matching("example-core-v1.2.3")],
     });
@@ -492,6 +598,8 @@ describe("reconcile", () => {
       reconcile(plan, "publish", ports, { attempts: 2 }),
     ).resolves.toEqual({
       state: "complete",
+      policy: defaultPolicy,
+      status: status("complete", "complete"),
       packages: [matching("example-core@1.2.3")],
       tags: [matching("example-core-v1.2.3")],
     });
@@ -511,10 +619,11 @@ describe("reconcile", () => {
     await expect(
       reconcile(plan, "publish", ports, { attempts: 2 }),
     ).resolves.toEqual({
-      state: "failed",
-      reason: "incomplete",
+      state: "incomplete",
       retryable: true,
       operationError: "credential rejected",
+      policy: defaultPolicy,
+      status: status("incomplete", "complete", ["example-core@1.2.3"]),
       packages: [{ state: "missing", subject: "example-core@1.2.3" }],
       tags: [matching("example-core-v1.2.3")],
     });
@@ -536,6 +645,8 @@ describe("reconcile", () => {
       reconcile(releasePlan, "check", ports, { attempts: 3 }),
     ).resolves.toEqual({
       state: "complete",
+      policy: defaultPolicy,
+      status: statusWithRelease("complete", "complete", "complete"),
       packages: [matching("example-core@1.2.3")],
       tags: [matching("example-core-v1.2.3")],
       githubRelease: matching("v1.2.3"),
@@ -595,6 +706,8 @@ describe("reconcile", () => {
       reconcile(releasePlan, "finalize", ports, { attempts: 1 }),
     ).resolves.toEqual({
       state: "complete",
+      policy: defaultPolicy,
+      status: statusWithRelease("complete", "complete", "complete"),
       packages: [matching("example-core@1.2.3")],
       tags: [matching("example-core-v1.2.3")],
       githubRelease: matching("v1.2.3"),
@@ -620,6 +733,8 @@ describe("reconcile", () => {
       reconcile(plan, "all", ports, { attempts: 1 }),
     ).resolves.toEqual({
       state: "complete",
+      policy: defaultPolicy,
+      status: status("complete", "complete"),
       packages: [matching("example-core@1.2.3")],
       tags: [matching("example-core-v1.2.3")],
     });
@@ -646,6 +761,8 @@ describe("reconcile", () => {
       reconcile(releasePlan, "finalize", ports, { attempts: 1 }),
     ).resolves.toEqual({
       state: "complete",
+      policy: defaultPolicy,
+      status: statusWithRelease("complete", "complete", "complete"),
       packages: [matching("example-core@1.2.3")],
       tags: [matching("example-core-v1.2.3")],
       githubRelease: matching("v1.2.3"),
@@ -677,9 +794,273 @@ describe("reconcile", () => {
       reconcile(releasePlan, "finalize", ports, { attempts: 1 }),
     ).resolves.toEqual({
       state: "complete",
+      policy: defaultPolicy,
+      status: statusWithRelease("complete", "complete", "complete"),
       packages: [matching("example-core@1.2.3")],
       tags: [matching("example-core-v1.2.3")],
       githubRelease: matching("v1.2.3"),
     });
+  });
+
+  test("ties the pending-crates report to its retry contract", () => {
+    expectTypeOf<
+      Extract<ReconcileReport, { state: "incomplete" }>["retryable"]
+    >().toEqualTypeOf<true>();
+  });
+
+  test("creates the tags and the GitHub Release before any crate is published", async () => {
+    const releasePlan: ReleasePlan = {
+      ...plan,
+      githubRelease: productRelease,
+    };
+    const world = releaseWorld();
+
+    await expect(
+      reconcile(releasePlan, "finalize", world.ports, {
+        attempts: 1,
+        policy: tagFirstPolicy,
+      }),
+    ).resolves.toEqual({
+      state: "incomplete",
+      retryable: true,
+      policy: tagFirstPolicy,
+      status: statusWithRelease("incomplete", "complete", "complete", [
+        "example-core@1.2.3",
+      ]),
+      packages: [{ state: "missing", subject: "example-core@1.2.3" }],
+      tags: [matching("example-core-v1.2.3")],
+      githubRelease: matching("v1.2.3"),
+    });
+    expect(world.tags).toEqual(new Set(["example-core-v1.2.3"]));
+    expect(world.releases).toEqual(new Set(["v1.2.3"]));
+  });
+
+  test("creates the remaining tags while some crates are pending", async () => {
+    const world = releaseWorld();
+    world.crates.add("example-cli@1.2.3");
+    world.tags.add("example-cli-v1.2.3");
+
+    await expect(
+      reconcile(twoPackagePlan, "finalize", world.ports, {
+        attempts: 1,
+        policy: tagFirstPolicy,
+      }),
+    ).resolves.toEqual({
+      state: "incomplete",
+      retryable: true,
+      policy: tagFirstPolicy,
+      status: status("incomplete", "complete", ["example-core@1.2.3"]),
+      packages: [
+        { state: "missing", subject: "example-core@1.2.3" },
+        matching("example-cli@1.2.3"),
+      ],
+      tags: [matching("example-core-v1.2.3"), matching("example-cli-v1.2.3")],
+    });
+    expect(world.tags).toEqual(
+      new Set(["example-core-v1.2.3", "example-cli-v1.2.3"]),
+    );
+  });
+
+  test("converges to complete when a later run publishes the pending crates", async () => {
+    const world = releaseWorld();
+
+    await expect(
+      reconcile(twoPackagePlan, "finalize", world.ports, {
+        attempts: 1,
+        policy: tagFirstPolicy,
+      }),
+    ).resolves.toMatchObject({
+      state: "incomplete",
+      status: status("incomplete", "complete", [
+        "example-core@1.2.3",
+        "example-cli@1.2.3",
+      ]),
+    });
+
+    await expect(
+      reconcile(twoPackagePlan, "publish", world.ports, {
+        attempts: 1,
+        policy: tagFirstPolicy,
+      }),
+    ).resolves.toMatchObject({
+      state: "complete",
+      status: status("complete", "complete"),
+    });
+
+    world.ports.createTag = vi.fn();
+    world.ports.createGithubRelease = vi.fn();
+    world.ports.updateGithubRelease = vi.fn();
+
+    await expect(
+      reconcile(twoPackagePlan, "finalize", world.ports, {
+        attempts: 1,
+        policy: tagFirstPolicy,
+      }),
+    ).resolves.toMatchObject({
+      state: "complete",
+      status: status("complete", "complete"),
+    });
+    expect(world.ports.createTag).not.toHaveBeenCalled();
+    expect(world.ports.createGithubRelease).not.toHaveBeenCalled();
+    expect(world.ports.updateGithubRelease).not.toHaveBeenCalled();
+  });
+
+  test("stops on a crate published from another commit while crates may be pending", async () => {
+    const world = releaseWorld();
+    world.ports.observePackage = async (item) => ({
+      state: "conflicting",
+      subject: `${item.name}@${item.version}`,
+      detail: "published from another commit",
+    });
+    world.ports.createTag = vi.fn(world.ports.createTag);
+
+    await expect(
+      reconcile(plan, "finalize", world.ports, {
+        attempts: 1,
+        policy: tagFirstPolicy,
+      }),
+    ).resolves.toMatchObject({
+      state: "failed",
+      reason: "conflict",
+      retryable: false,
+      status: status("conflict", "incomplete"),
+    });
+    expect(world.ports.createTag).not.toHaveBeenCalled();
+  });
+
+  test("stops on a tag that targets another commit while crates may be pending", async () => {
+    const world = releaseWorld();
+    world.ports.observeTag = async (item) => ({
+      state: "conflicting",
+      subject: item.tag,
+      detail: "tag does not target the release commit",
+    });
+    world.ports.createTag = vi.fn(world.ports.createTag);
+
+    await expect(
+      reconcile(plan, "finalize", world.ports, {
+        attempts: 1,
+        policy: tagFirstPolicy,
+      }),
+    ).resolves.toMatchObject({
+      state: "failed",
+      reason: "conflict",
+      retryable: false,
+      status: status("incomplete", "conflict", ["example-core@1.2.3"]),
+    });
+    expect(world.ports.createTag).not.toHaveBeenCalled();
+  });
+
+  test("stops on a GitHub Release with a conflicting channel while crates may be pending", async () => {
+    const releasePlan: ReleasePlan = {
+      ...plan,
+      githubRelease: productRelease,
+    };
+    const world = releaseWorld();
+    world.ports.observeGithubRelease = async (release) => ({
+      state: "conflicting",
+      subject: release.tag,
+      detail: "GitHub Release prerelease channel differs",
+    });
+    world.ports.createGithubRelease = vi.fn(world.ports.createGithubRelease);
+
+    await expect(
+      reconcile(releasePlan, "finalize", world.ports, {
+        attempts: 1,
+        policy: tagFirstPolicy,
+      }),
+    ).resolves.toMatchObject({
+      state: "failed",
+      reason: "conflict",
+      retryable: false,
+      status: statusWithRelease("incomplete", "incomplete", "conflict", [
+        "example-core@1.2.3",
+      ]),
+    });
+    expect(world.ports.createGithubRelease).not.toHaveBeenCalled();
+  });
+
+  test("reports the policy and the pending crate count in check", async () => {
+    const world = releaseWorld();
+
+    await expect(
+      reconcile(twoPackagePlan, "check", world.ports, {
+        attempts: 1,
+        policy: tagFirstPolicy,
+      }),
+    ).resolves.toEqual({
+      state: "incomplete",
+      retryable: true,
+      policy: tagFirstPolicy,
+      status: status("incomplete", "incomplete", [
+        "example-core@1.2.3",
+        "example-cli@1.2.3",
+      ]),
+      packages: [
+        { state: "missing", subject: "example-core@1.2.3" },
+        { state: "missing", subject: "example-cli@1.2.3" },
+      ],
+      tags: [
+        { state: "missing", subject: "example-core-v1.2.3" },
+        { state: "missing", subject: "example-cli-v1.2.3" },
+      ],
+    });
+    expect(world.tags).toEqual(new Set());
+  });
+
+  test("finalizes in the all phase when publication leaves crates pending", async () => {
+    const world = releaseWorld();
+    world.ports.publishPackages = vi.fn();
+
+    await expect(
+      reconcile(plan, "all", world.ports, {
+        attempts: 1,
+        policy: tagFirstPolicy,
+      }),
+    ).resolves.toEqual({
+      state: "incomplete",
+      retryable: true,
+      policy: tagFirstPolicy,
+      status: status("incomplete", "complete", ["example-core@1.2.3"]),
+      packages: [{ state: "missing", subject: "example-core@1.2.3" }],
+      tags: [matching("example-core-v1.2.3")],
+    });
+    expect(world.tags).toEqual(new Set(["example-core-v1.2.3"]));
+  });
+
+  test("keeps a Cargo error visible after finalizing tags", async () => {
+    const world = releaseWorld();
+    world.ports.publishPackages = vi.fn(async () => {
+      throw new Error("credential rejected");
+    });
+
+    await expect(
+      reconcile(plan, "all", world.ports, {
+        attempts: 1,
+        policy: tagFirstPolicy,
+      }),
+    ).resolves.toMatchObject({
+      state: "incomplete",
+      retryable: true,
+      operationError: "credential rejected",
+      status: status("incomplete", "complete", ["example-core@1.2.3"]),
+    });
+    expect(world.tags).toEqual(new Set(["example-core-v1.2.3"]));
+  });
+
+  test("keeps the publish phase complete only when every crate exists", async () => {
+    const world = releaseWorld();
+    world.ports.publishPackages = vi.fn();
+
+    await expect(
+      reconcile(plan, "publish", world.ports, {
+        attempts: 1,
+        policy: tagFirstPolicy,
+      }),
+    ).resolves.toMatchObject({
+      state: "incomplete",
+      retryable: true,
+    });
+    expect(world.tags).toEqual(new Set());
   });
 });

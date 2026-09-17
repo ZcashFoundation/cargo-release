@@ -142,10 +142,21 @@ jobs:
           if (JSON.stringify(plan.packages.map(({ name, version }) => `${name}@${version}`)) !== JSON.stringify(expectedPackages)) {
             throw new Error("plan packages do not match the target workspace");
           }
-          if (report.state !== "failed" || report.reason !== "incomplete" || report.retryable !== true) {
+          if (report.state !== "incomplete" || report.retryable !== true) {
             throw new Error("check report must describe the unpublished release as retryable and incomplete");
           }
-          if ("githubRelease" in report) throw new Error("smoke workspace must not configure a GitHub Release");
+          if (report.status.crates !== "incomplete" || report.status.tags !== "incomplete") {
+            throw new Error("check status must describe the crates and tags as incomplete");
+          }
+          if (JSON.stringify(report.status.pendingCrates) !== JSON.stringify(expectedPackages)) {
+            throw new Error("check status must list every planned crate as pending");
+          }
+          if (report.policy.finalize.allowMissingCrates !== false) {
+            throw new Error("check report must carry the default finalize policy");
+          }
+          if ("githubRelease" in report || "githubRelease" in report.status) {
+            throw new Error("smoke workspace must not configure a GitHub Release");
+          }
 
           const assertMissing = (observations, expected, label) => {
             if (!Array.isArray(observations) || observations.length !== expected.length) {
@@ -193,7 +204,10 @@ jobs:
           if (plan.packages.length !== 2) {
             throw new Error("the invalid notes check did not produce the Cargo plan");
           }
-          if (report.reason !== "incomplete") {
+          if (report.state !== "incomplete") {
             throw new Error("the invalid notes check did not finish Cargo reconciliation");
+          }
+          if (report.status.crates !== "incomplete") {
+            throw new Error("the invalid notes check did not report the crate status");
           }
           NODE

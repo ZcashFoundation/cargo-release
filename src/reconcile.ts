@@ -13,7 +13,7 @@ export type {
   ReleasePolicy,
 } from "./release-plan.js";
 
-export type Phase = "check" | "publish" | "finalize" | "all";
+export type Phase = "observe" | "check" | "publish" | "finalize" | "all";
 
 type StableObservation = Readonly<{
   state: "matching" | "missing";
@@ -487,6 +487,8 @@ export async function reconcile(
 ): Promise<ReconcileReport> {
   const policy = options.policy ?? DEFAULT_POLICY;
   let state = await observeDesiredState(plan, ports);
+  if (phase === "observe") return observed(state, policy);
+
   const preflightFailure = inspectionFailure(state, policy);
   if (preflightFailure) return preflightFailure;
 

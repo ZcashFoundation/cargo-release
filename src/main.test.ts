@@ -357,6 +357,85 @@ test("fails a pending-crates run that also reports a Cargo error", async () => {
   );
 });
 
+test("observes release state without running Cargo", async () => {
+  mocks.getInput.mockImplementation((name: string) =>
+    name === "phase" ? "observe" : (defaultInputs[name] ?? ""),
+  );
+  mocks.reconcile.mockImplementationOnce(
+    async (releasePlan: ReleasePlan, phase: string, ports: ReconcilePorts) => {
+      expect(phase).toBe("observe");
+      const item = releasePlan.packages[0];
+      if (item === undefined) throw new Error("test plan has no package");
+      await expect(ports.observePackage(item)).resolves.toEqual({
+        state: "missing",
+        subject: "example@1.2.3",
+      });
+      return {
+        state: "incomplete",
+        retryable: true,
+        policy,
+        status: {
+          crates: "incomplete",
+          tags: "incomplete",
+          pendingCrates: ["example@1.2.3"],
+        },
+        packages: [{ state: "missing", subject: "example@1.2.3" }],
+        tags: [{ state: "missing", subject: "example-v1.2.3" }],
+      };
+    },
+  );
+
+  await import("./main.js");
+
+  await vi.waitFor(() =>
+    expect(mocks.setOutput).toHaveBeenCalledWith(
+      "report",
+      expect.stringContaining('"pendingCrates":["example@1.2.3"]'),
+    ),
+  );
+  expect(mocks.dryRun).not.toHaveBeenCalled();
+  expect(mocks.publish).not.toHaveBeenCalled();
+  expect(mocks.setFailed).not.toHaveBeenCalled();
+});
+
+test("observes release state before reporting invalid release notes", async () => {
+  const githubReleaseError = new Error(
+    'release notes heading "## [Zebra 1.2.3]" was not found',
+  );
+  mocks.getInput.mockImplementation((name: string) =>
+    name === "phase" ? "observe" : (defaultInputs[name] ?? ""),
+  );
+  mocks.loadReleasePlan.mockResolvedValueOnce({
+    plan,
+    policy,
+    githubReleaseError,
+  });
+  mocks.reconcile.mockResolvedValueOnce({
+    state: "complete",
+    policy,
+    status: {
+      crates: "complete",
+      tags: "complete",
+      pendingCrates: [],
+    },
+    packages: [{ state: "matching", subject: "example@1.2.3" }],
+    tags: [{ state: "matching", subject: "example-v1.2.3" }],
+  });
+
+  await import("./main.js");
+
+  await vi.waitFor(() =>
+    expect(mocks.setFailed).toHaveBeenCalledExactlyOnceWith(
+      `GitHub Release validation failed: ${githubReleaseError.message}`,
+    ),
+  );
+  expect(mocks.reconcile).toHaveBeenCalledOnce();
+  expect(mocks.setOutput).toHaveBeenCalledWith(
+    "report",
+    expect.stringContaining('"state":"complete"'),
+  );
+});
+
 test("succeeds when the release is already complete", async () => {
   mocks.getInput.mockImplementation((name: string) =>
     name === "phase" ? "all" : (defaultInputs[name] ?? ""),

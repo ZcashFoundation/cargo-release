@@ -1063,4 +1063,117 @@ describe("reconcile", () => {
     });
     expect(world.tags).toEqual(new Set());
   });
+
+  test("observes an unpublished release without running Cargo", async () => {
+    const world = releaseWorld();
+    world.ports.dryRunPackages = vi.fn();
+    world.ports.publishPackages = vi.fn();
+    world.ports.createTag = vi.fn();
+
+    await expect(
+      reconcile(twoPackagePlan, "observe", world.ports, { attempts: 1 }),
+    ).resolves.toEqual({
+      state: "incomplete",
+      retryable: true,
+      policy: defaultPolicy,
+      status: status("incomplete", "incomplete", [
+        "example-core@1.2.3",
+        "example-cli@1.2.3",
+      ]),
+      packages: [
+        { state: "missing", subject: "example-core@1.2.3" },
+        { state: "missing", subject: "example-cli@1.2.3" },
+      ],
+      tags: [
+        { state: "missing", subject: "example-core-v1.2.3" },
+        { state: "missing", subject: "example-cli-v1.2.3" },
+      ],
+    });
+    expect(world.ports.dryRunPackages).not.toHaveBeenCalled();
+    expect(world.ports.publishPackages).not.toHaveBeenCalled();
+    expect(world.ports.createTag).not.toHaveBeenCalled();
+  });
+
+  test("observes existing tags while every crate is still pending", async () => {
+    const world = releaseWorld();
+    world.tags.add("example-core-v1.2.3");
+    world.tags.add("example-cli-v1.2.3");
+
+    await expect(
+      reconcile(twoPackagePlan, "observe", world.ports, { attempts: 1 }),
+    ).resolves.toMatchObject({
+      state: "incomplete",
+      status: status("incomplete", "complete", [
+        "example-core@1.2.3",
+        "example-cli@1.2.3",
+      ]),
+    });
+  });
+
+  test("observes tags with part of the package set published", async () => {
+    const world = releaseWorld();
+    world.tags.add("example-core-v1.2.3");
+    world.tags.add("example-cli-v1.2.3");
+    world.crates.add("example-core@1.2.3");
+
+    await expect(
+      reconcile(twoPackagePlan, "observe", world.ports, { attempts: 1 }),
+    ).resolves.toMatchObject({
+      state: "incomplete",
+      status: status("incomplete", "complete", ["example-cli@1.2.3"]),
+      packages: [
+        matching("example-core@1.2.3"),
+        { state: "missing", subject: "example-cli@1.2.3" },
+      ],
+    });
+  });
+
+  test("observes a fully published release as complete", async () => {
+    const releasePlan: ReleasePlan = {
+      ...plan,
+      githubRelease: productRelease,
+    };
+    const world = releaseWorld();
+    world.crates.add("example-core@1.2.3");
+    world.tags.add("example-core-v1.2.3");
+    world.releases.add("v1.2.3");
+
+    await expect(
+      reconcile(releasePlan, "observe", world.ports, { attempts: 1 }),
+    ).resolves.toEqual({
+      state: "complete",
+      policy: defaultPolicy,
+      status: statusWithRelease("complete", "complete", "complete"),
+      packages: [matching("example-core@1.2.3")],
+      tags: [matching("example-core-v1.2.3")],
+      githubRelease: matching("v1.2.3"),
+    });
+  });
+
+  test("reports a provenance contradiction instead of failing the observation", async () => {
+    const world = releaseWorld();
+    world.tags.add("example-core-v1.2.3");
+    world.ports.observePackage = async (item) => ({
+      state: "conflicting",
+      subject: `${item.name}@${item.version}`,
+      detail: "published from another commit",
+    });
+
+    await expect(
+      reconcile(plan, "observe", world.ports, { attempts: 1 }),
+    ).resolves.toEqual({
+      state: "incomplete",
+      retryable: true,
+      policy: defaultPolicy,
+      status: status("conflict", "complete"),
+      packages: [
+        {
+          state: "conflicting",
+          subject: "example-core@1.2.3",
+          detail: "published from another commit",
+        },
+      ],
+      tags: [matching("example-core-v1.2.3")],
+    });
+  });
 });

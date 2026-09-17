@@ -6,7 +6,7 @@ branding:
   color: blue
 inputs:
   phase:
-    description: "Reconciliation phase: check, publish, finalize, or all"
+    description: "Reconciliation phase: observe, check, publish, finalize, or all"
     required: false
     default: all
   source-directory:

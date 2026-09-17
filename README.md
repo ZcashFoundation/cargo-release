@@ -418,7 +418,7 @@ cannot set `makeLatest` to `true`.
 
 | Input              | Required | Default                     | Description                                                |
 | ------------------ | -------- | --------------------------- | ---------------------------------------------------------- |
-| `phase`            | No       | `all`                       | `check`, `publish`, `finalize`, or `all`.                  |
+| `phase`            | No       | `all`                       | `observe`, `check`, `publish`, `finalize`, or `all`.       |
 | `source-directory` | No       | `.`                         | Cargo workspace within the target checkout.                |
 | `base-sha`         | Yes      |                             | Full commit SHA before the approved release change.        |
 | `target-sha`       | Yes      |                             | Full approved release commit SHA.                          |
@@ -454,19 +454,34 @@ the shape of the config file.
 
 The step result follows from the state and the phase. A `complete` report
 succeeds and a `failed` report fails. An `incomplete` report fails whenever
-Cargo returned an error. Without a Cargo error it succeeds in `check`, and in
-`finalize` and `all` when `finalize.allowMissingCrates` is enabled. Every other
-`incomplete` report fails and names the missing objects: a `publish` phase that
-did not finish, and `finalize` or `all` under the default policy.
+Cargo returned an error. Without a Cargo error it succeeds in `observe` and
+`check`, and in `finalize` and `all` when `finalize.allowMissingCrates` is
+enabled. Every other `incomplete` report fails and names the missing objects: a
+`publish` phase that did not finish, and `finalize` or `all` under the default
+policy.
 
 ## Phases
 
 | Phase      | Behavior                                                                     |
 | ---------- | ---------------------------------------------------------------------------- |
+| `observe`  | Report observed release state only, without Cargo packaging or writes.       |
 | `check`    | Observe release state and dry-run the complete Cargo plan without writes.    |
 | `publish`  | Preflight the complete plan, publish missing crates, then poll crates.io.    |
 | `finalize` | Apply the crate requirement, then reconcile tags and the GitHub Release.     |
 | `all`      | Publish missing crates and continue to finalization after crates.io matches. |
+
+`observe` answers one question cheaply: has the release for this base and target
+pair fully published? It reads Cargo metadata to derive the plan, then reads
+crates.io, the repository tags, and the GitHub Release. It never packages,
+dry-runs, publishes, or writes, so a repository can run it on every push. Its
+report reaches `state: "complete"` only when every crate, tag, and the optional
+GitHub Release match the target commit.
+
+Unlike `check`, `observe` reports contradictions instead of failing on them. A
+crate published from another commit or a tag on another commit appears as
+`crates: "conflict"` or `tags: "conflict"` with the offending observation, and
+the step still succeeds. Invalid release notes remain a step failure, and the
+report is written before that failure.
 
 `check` exits successfully when desired state is incomplete because that is the
 normal pre-release condition. Its JSON report uses `state: "incomplete"` to

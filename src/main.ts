@@ -62,7 +62,7 @@ async function run(): Promise<void> {
     workspacePlanPorts(),
   );
   core.setOutput("plan", JSON.stringify(plan));
-  if (phase !== "check" && githubReleaseError !== undefined) {
+  if (mutatesReleaseState(phase) && githubReleaseError !== undefined) {
     throw githubReleaseError;
   }
 
@@ -136,6 +136,10 @@ async function run(): Promise<void> {
   }
 }
 
+function mutatesReleaseState(phase: Phase): boolean {
+  return phase !== "observe" && phase !== "check";
+}
+
 function reportFailureMessages(
   report: ReconcileReport,
   phase: Phase,
@@ -169,7 +173,7 @@ function reportFailureMessages(
 
 function stepSucceeds(report: IncompleteReport, phase: Phase): boolean {
   if (report.operationError !== undefined) return false;
-  if (phase === "check") return true;
+  if (phase === "observe" || phase === "check") return true;
   return (
     (phase === "finalize" || phase === "all") &&
     report.policy.finalize.allowMissingCrates
@@ -343,6 +347,7 @@ function githubApi(token: string): GithubApi {
 
 function parsePhase(value: string): Phase {
   if (
+    value === "observe" ||
     value === "check" ||
     value === "publish" ||
     value === "finalize" ||
@@ -350,7 +355,7 @@ function parsePhase(value: string): Phase {
   ) {
     return value;
   }
-  throw new Error("phase must be check, publish, finalize, or all");
+  throw new Error("phase must be observe, check, publish, finalize, or all");
 }
 
 function parseAttempts(value: string): number {

@@ -3,6 +3,7 @@ import { describe, expect, expectTypeOf, test, vi } from "vitest";
 import {
   reconcile,
   type FailedReport,
+  type GithubRelease,
   type Observation,
   type ReconcilePorts,
   type ReleasePlan,
@@ -22,6 +23,17 @@ const plan: ReleasePlan = {
       tag: "example-core-v1.2.3",
     },
   ],
+};
+
+const productRelease: GithubRelease = {
+  package: "example-cli",
+  version: "1.2.3",
+  tag: "v1.2.3",
+  tagTemplate: "v{version}",
+  name: "Zebra 1.2.3",
+  notes: "Release notes",
+  prerelease: false,
+  makeLatest: "true",
 };
 
 function matching(subject: string): Observation {
@@ -323,13 +335,7 @@ describe("reconcile", () => {
   test("finalizes missing tags before creating the optional GitHub Release", async () => {
     const releasePlan: ReleasePlan = {
       ...plan,
-      githubRelease: {
-        tag: "v1.2.3",
-        name: "Zebra 1.2.3",
-        notes: "Release notes",
-        prerelease: false,
-        makeLatest: "true",
-      },
+      githubRelease: productRelease,
     };
     const ports = matchingPorts();
     const tagObservations = [
@@ -519,13 +525,7 @@ describe("reconcile", () => {
   test("checks a configured matching GitHub Release without writing", async () => {
     const releasePlan: ReleasePlan = {
       ...plan,
-      githubRelease: {
-        tag: "v1.2.3",
-        name: "Zebra 1.2.3",
-        notes: "Release notes",
-        prerelease: false,
-        makeLatest: "true",
-      },
+      githubRelease: productRelease,
     };
     const ports = matchingPorts();
     ports.observeGithubRelease = vi.fn(async () => matching("v1.2.3"));
@@ -548,13 +548,7 @@ describe("reconcile", () => {
   test("does not create a GitHub Release when its state conflicts", async () => {
     const releasePlan: ReleasePlan = {
       ...plan,
-      githubRelease: {
-        tag: "v1.2.3",
-        name: "Zebra 1.2.3",
-        notes: "Release notes",
-        prerelease: false,
-        makeLatest: "true",
-      },
+      githubRelease: productRelease,
     };
     const ports = matchingPorts();
     ports.observeGithubRelease = async () => ({
@@ -579,13 +573,7 @@ describe("reconcile", () => {
   test("repairs mutable GitHub Release metadata and verifies desired state", async () => {
     const releasePlan: ReleasePlan = {
       ...plan,
-      githubRelease: {
-        tag: "v1.2.3",
-        name: "Zebra 1.2.3",
-        notes: "Release notes",
-        prerelease: false,
-        makeLatest: "auto",
-      },
+      githubRelease: productRelease,
     };
     const ports = matchingPorts();
     const observations = [
@@ -640,13 +628,7 @@ describe("reconcile", () => {
   test("uses an explicit missing GitHub Release observation and verifies its creation", async () => {
     const releasePlan: ReleasePlan = {
       ...plan,
-      githubRelease: {
-        tag: "v1.2.3",
-        name: "Zebra 1.2.3",
-        notes: "Release notes",
-        prerelease: false,
-        makeLatest: "true",
-      },
+      githubRelease: productRelease,
     };
     const ports = matchingPorts();
     const observations: Observation[] = [
@@ -675,13 +657,7 @@ describe("reconcile", () => {
   test("reobserves a GitHub Release after an already-exists creation race", async () => {
     const releasePlan: ReleasePlan = {
       ...plan,
-      githubRelease: {
-        tag: "v1.2.3",
-        name: "Zebra 1.2.3",
-        notes: "Release notes",
-        prerelease: false,
-        makeLatest: "true",
-      },
+      githubRelease: productRelease,
     };
     const ports = matchingPorts();
     const observations = [

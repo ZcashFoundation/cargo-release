@@ -15,6 +15,7 @@ import {
   type CreateRefInput,
   type CreateReleaseInput,
   type GithubApi,
+  type GithubReleaseRecord,
   type UpdateReleaseInput,
 } from "./github-state.js";
 import {
@@ -30,6 +31,8 @@ const CRATES_IO_API = "https://crates.io/api/v1/crates/{name}/{version}";
 const CRATES_IO_DOWNLOAD =
   "https://crates.io/api/v1/crates/{name}/{version}/download";
 const GITHUB_REQUEST_TIMEOUT_MILLISECONDS = 30_000;
+const GITHUB_RELEASE_PAGE_SIZE = 100;
+const GITHUB_RELEASE_PAGE_LIMIT = 20;
 const REOBSERVATION_DELAY_MILLISECONDS = 15_000;
 
 async function run(): Promise<void> {
@@ -275,6 +278,32 @@ function githubApi(token: string): GithubApi {
         }
         throw asError(error);
       }
+    },
+    async listReleases() {
+      const releases: GithubReleaseRecord[] = [];
+      for (let page = 1; page <= GITHUB_RELEASE_PAGE_LIMIT; page += 1) {
+        const { data } = await octokit.rest.repos.listReleases({
+          owner,
+          repo,
+          per_page: GITHUB_RELEASE_PAGE_SIZE,
+          page,
+          request: request(),
+        });
+        releases.push(
+          ...data.map((item) => ({
+            id: item.id,
+            tagName: item.tag_name,
+            name: item.name,
+            body: item.body ?? null,
+            prerelease: item.prerelease,
+            draft: item.draft,
+          })),
+        );
+        if (data.length < GITHUB_RELEASE_PAGE_SIZE) return releases;
+      }
+      throw new Error(
+        `repository has more than ${GITHUB_RELEASE_PAGE_LIMIT * GITHUB_RELEASE_PAGE_SIZE} releases`,
+      );
     },
     async createRelease(input: CreateReleaseInput) {
       await octokit.rest.repos.createRelease({

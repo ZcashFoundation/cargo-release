@@ -186,7 +186,6 @@ githubRelease:
   nameTemplate: "Example Server {version}"
   notesFile: CHANGELOG.md
   notesHeadingTemplate: "## [Example Server {version}]"
-  makeLatest: auto
 ```
 
 The optional GitHub Release is included only when its configured package
@@ -317,13 +316,13 @@ Each run submits a missing package set to Cargo at most once, then polls
 crates.io without resubmitting that set. A later workflow rerun observes what
 succeeded and derives the remaining package set from external state.
 
-| State         | Meaning                                                                    | Result                                                             |
-| ------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `matching`    | The object matches the target commit and release plan.                     | Keep it unchanged.                                                 |
-| `missing`     | The object does not exist.                                                 | Create it in `publish`, `finalize`, or `all`.                      |
-| `repairable`  | A GitHub Release has the correct tag but mutable metadata differs.         | Update its name, notes, draft state, or explicit latest selection. |
-| `conflicting` | Existing immutable state points at another commit or contradicts the plan. | Stop before further writes.                                        |
-| `transient`   | crates.io or GitHub could not be observed reliably.                        | Stop with a retryable report.                                      |
+| State         | Meaning                                                                    | Result                                                    |
+| ------------- | -------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `matching`    | The object matches the target commit and release plan.                     | Keep it unchanged.                                        |
+| `missing`     | The object does not exist.                                                 | Create it in `publish`, `finalize`, or `all`.             |
+| `repairable`  | A GitHub Release has the correct tag but mutable metadata differs.         | Update its name, notes, draft state, or latest selection. |
+| `conflicting` | Existing immutable state points at another commit or contradicts the plan. | Stop before further writes.                               |
+| `transient`   | crates.io or GitHub could not be observed reliably.                        | Stop with a retryable report.                             |
 
 Finalization starts only after every planned crate version exists with the
 expected Cargo-recorded commit. The action creates tags next and the optional
@@ -343,13 +342,19 @@ Templates support `{name}` and `{version}`:
 | `githubRelease.notesFile`             | For a GitHub Release |                     | Release notes file inside the target checkout.              |
 | `githubRelease.notesHeadingTemplate`  | No                   | Entire notes file   | Markdown heading prefix used to select one release section. |
 | `githubRelease.prerelease`            | No                   | Derived from semver | Override prerelease status.                                 |
-| `githubRelease.makeLatest`            | No                   | `auto`              | `auto`, `true`, or `false`; YAML booleans are accepted.     |
+| `githubRelease.makeLatest`            | No                   | Highest stable      | `true`, `false`, or omitted for the highest stable version. |
 
 `notesHeadingTemplate` must render a Markdown heading. It matches the heading
-prefix, so the source heading may append a link or date. `auto` delegates
-latest-release selection to GitHub's legacy version and creation-date policy.
-An explicit `true` or `false` is observed and reconciled, while a prerelease
-cannot set `makeLatest` to `true`.
+prefix, so the source heading may append a link or date.
+
+An omitted `makeLatest` reads the repository's published releases, keeps the
+tags that match the package's tag template, and ignores drafts, prereleases,
+and the release's own tag. The release becomes the latest release only when its
+version carries no prerelease component and is greater than or equal to every
+version it read, so a patch for an older line never displaces a newer release
+and a rerun reaches the same selection. An explicit `true` or `false` is
+observed and reconciled the same way, while a prerelease cannot set
+`makeLatest` to `true`.
 
 ## Inputs and outputs
 

@@ -24,7 +24,7 @@ githubRelease:
   nameTemplate: "Zebra {version}"
   notesFile: CHANGELOG.md
   notesHeadingTemplate: "## [Zebra {version}]"
-  makeLatest: auto
+  makeLatest: false
 `),
     ).toEqual({
       tagTemplate: "{name}-v{version}",
@@ -34,7 +34,7 @@ githubRelease:
         nameTemplate: "Zebra {version}",
         notesFile: "CHANGELOG.md",
         notesHeadingTemplate: "## [Zebra {version}]",
-        makeLatest: "auto",
+        makeLatest: "false",
       },
     });
 
@@ -52,7 +52,6 @@ githubRelease:
   it.each([
     ["true", "true"],
     ["false", "false"],
-    ["auto", "auto"],
   ] as const)("normalizes makeLatest: %s to %s", (source, expected) => {
     expect(
       parseReleasePlanConfig(`
@@ -64,6 +63,19 @@ githubRelease:
     ).toMatchObject({
       githubRelease: { makeLatest: expected },
     });
+  });
+
+  it("rejects a makeLatest value that is neither true nor false", () => {
+    expect(() =>
+      parseReleasePlanConfig(`
+githubRelease:
+  package: zebrad
+  notesFile: CHANGELOG.md
+  makeLatest: auto
+`),
+    ).toThrow(
+      "githubRelease.makeLatest must be true or false; omit it to mark the release latest only when it is the highest published stable version",
+    );
   });
 });
 

@@ -19,6 +19,9 @@ const plan: ReleasePlan = {
   ],
 };
 
+const policy = { finalize: { allowMissingCrates: false } };
+const tagFirstPolicy = { finalize: { allowMissingCrates: true } };
+
 const defaultInputs: Readonly<Record<string, string>> = {
   phase: "check",
   attempts: "3",
@@ -105,7 +108,7 @@ beforeEach(() => {
   mocks.getInput.mockImplementation(
     (name: string) => defaultInputs[name] ?? "",
   );
-  mocks.loadReleasePlan.mockResolvedValue({ plan });
+  mocks.loadReleasePlan.mockResolvedValue({ plan, policy });
   mocks.observeCrateVersion.mockResolvedValue({
     state: "missing",
     subject: "example@1.2.3",
@@ -136,7 +139,7 @@ beforeEach(() => {
     ) => {
       expect(releasePlan).toBe(plan);
       expect(phase).toBe("check");
-      expect(options).toEqual({ attempts: 3 });
+      expect(options).toEqual({ attempts: 3, policy });
       const item = releasePlan.packages[0];
       if (item === undefined) throw new Error("test plan has no package");
       await expect(ports.observePackage(item)).resolves.toEqual({
@@ -149,9 +152,14 @@ beforeEach(() => {
       });
       await ports.dryRunPackages(releasePlan.packages);
       return {
-        state: "failed",
-        reason: "incomplete",
+        state: "incomplete",
         retryable: true,
+        policy,
+        status: {
+          crates: "incomplete",
+          tags: "incomplete",
+          pendingCrates: ["example@1.2.3"],
+        },
         packages: [{ state: "missing", subject: "example@1.2.3" }],
         tags: [{ state: "missing", subject: "example-v1.2.3" }],
       };
@@ -165,7 +173,7 @@ test("assembles a side-effect-free check and succeeds for incomplete state", asy
   await vi.waitFor(() =>
     expect(mocks.setOutput).toHaveBeenCalledWith(
       "report",
-      expect.stringContaining('"reason":"incomplete"'),
+      expect.stringContaining('"state":"incomplete"'),
     ),
   );
 
@@ -211,6 +219,7 @@ test("check dry-runs complete packages before reporting a missing release-notes 
   const reconcileError = "cargo publish --dry-run failed with exit code 101";
   mocks.loadReleasePlan.mockResolvedValueOnce({
     plan,
+    policy,
     githubReleaseError,
   });
   mocks.reconcile.mockImplementationOnce(
@@ -232,6 +241,42 @@ test("check dry-runs complete packages before reporting a missing release-notes 
   expect(failure).toEqual(expect.stringContaining(reconcileError));
 });
 
+test("check reports release state before failing on invalid release notes", async () => {
+  const githubReleaseError = new Error(
+    'release notes heading "## Release 1.2.3" was not found',
+  );
+  mocks.loadReleasePlan.mockResolvedValueOnce({
+    plan,
+    policy,
+    githubReleaseError,
+  });
+  mocks.reconcile.mockResolvedValueOnce({
+    state: "incomplete",
+    retryable: true,
+    policy,
+    status: {
+      crates: "incomplete",
+      tags: "incomplete",
+      pendingCrates: ["example@1.2.3"],
+    },
+    packages: [{ state: "missing", subject: "example@1.2.3" }],
+    tags: [{ state: "missing", subject: "example-v1.2.3" }],
+  });
+
+  await import("./main.js");
+
+  await vi.waitFor(() =>
+    expect(mocks.setFailed).toHaveBeenCalledExactlyOnceWith(
+      `GitHub Release validation failed: ${githubReleaseError.message}`,
+    ),
+  );
+  expect(mocks.setOutput).toHaveBeenCalledWith("plan", JSON.stringify(plan));
+  expect(mocks.setOutput).toHaveBeenCalledWith(
+    "report",
+    expect.stringContaining('"state":"incomplete"'),
+  );
+});
+
 test("publish fails before reconciliation when GitHub Release validation fails", async () => {
   const githubReleaseError = new Error(
     'release notes heading "## [Zebra 1.2.3]" was not found',
@@ -241,6 +286,7 @@ test("publish fails before reconciliation when GitHub Release validation fails",
   );
   mocks.loadReleasePlan.mockResolvedValueOnce({
     plan,
+    policy,
     githubReleaseError,
   });
 
@@ -254,4 +300,242 @@ test("publish fails before reconciliation when GitHub Release validation fails",
   expect(mocks.reconcile).not.toHaveBeenCalled();
   expect(mocks.dryRun).not.toHaveBeenCalled();
   expect(mocks.publish).not.toHaveBeenCalled();
+});
+
+test("succeeds when tags are complete and crates stay pending", async () => {
+  mocks.getInput.mockImplementation((name: string) =>
+    name === "phase" ? "finalize" : (defaultInputs[name] ?? ""),
+  );
+  mocks.reconcile.mockResolvedValueOnce({
+    state: "incomplete",
+    retryable: true,
+    policy: tagFirstPolicy,
+    status: {
+      crates: "incomplete",
+      tags: "complete",
+      pendingCrates: ["example@1.2.3"],
+    },
+    packages: [{ state: "missing", subject: "example@1.2.3" }],
+    tags: [{ state: "matching", subject: "example-v1.2.3" }],
+  });
+
+  await import("./main.js");
+
+  await vi.waitFor(() =>
+    expect(mocks.setOutput).toHaveBeenCalledWith(
+      "report",
+      expect.stringContaining('"crates":"incomplete"'),
+    ),
+  );
+  expect(mocks.setFailed).not.toHaveBeenCalled();
+});
+
+test("fails a pending-crates run that also reports a Cargo error", async () => {
+  mocks.getInput.mockImplementation((name: string) =>
+    name === "phase" ? "all" : (defaultInputs[name] ?? ""),
+  );
+  mocks.reconcile.mockResolvedValueOnce({
+    state: "incomplete",
+    retryable: true,
+    operationError: "credential rejected",
+    policy: tagFirstPolicy,
+    status: {
+      crates: "incomplete",
+      tags: "complete",
+      pendingCrates: ["example@1.2.3"],
+    },
+    packages: [{ state: "missing", subject: "example@1.2.3" }],
+    tags: [{ state: "matching", subject: "example-v1.2.3" }],
+  });
+
+  await import("./main.js");
+
+  await vi.waitFor(() =>
+    expect(mocks.setFailed).toHaveBeenCalledExactlyOnceWith(
+      "release reconciliation incomplete: example@1.2.3: missing; operation failed: credential rejected",
+    ),
+  );
+});
+
+test("observes release state without running Cargo", async () => {
+  mocks.getInput.mockImplementation((name: string) =>
+    name === "phase" ? "observe" : (defaultInputs[name] ?? ""),
+  );
+  mocks.reconcile.mockImplementationOnce(
+    async (releasePlan: ReleasePlan, phase: string, ports: ReconcilePorts) => {
+      expect(phase).toBe("observe");
+      const item = releasePlan.packages[0];
+      if (item === undefined) throw new Error("test plan has no package");
+      await expect(ports.observePackage(item)).resolves.toEqual({
+        state: "missing",
+        subject: "example@1.2.3",
+      });
+      return {
+        state: "incomplete",
+        retryable: true,
+        policy,
+        status: {
+          crates: "incomplete",
+          tags: "incomplete",
+          pendingCrates: ["example@1.2.3"],
+        },
+        packages: [{ state: "missing", subject: "example@1.2.3" }],
+        tags: [{ state: "missing", subject: "example-v1.2.3" }],
+      };
+    },
+  );
+
+  await import("./main.js");
+
+  await vi.waitFor(() =>
+    expect(mocks.setOutput).toHaveBeenCalledWith(
+      "report",
+      expect.stringContaining('"pendingCrates":["example@1.2.3"]'),
+    ),
+  );
+  expect(mocks.dryRun).not.toHaveBeenCalled();
+  expect(mocks.publish).not.toHaveBeenCalled();
+  expect(mocks.setFailed).not.toHaveBeenCalled();
+});
+
+test("observes release state before reporting invalid release notes", async () => {
+  const githubReleaseError = new Error(
+    'release notes heading "## [Zebra 1.2.3]" was not found',
+  );
+  mocks.getInput.mockImplementation((name: string) =>
+    name === "phase" ? "observe" : (defaultInputs[name] ?? ""),
+  );
+  mocks.loadReleasePlan.mockResolvedValueOnce({
+    plan,
+    policy,
+    githubReleaseError,
+  });
+  mocks.reconcile.mockResolvedValueOnce({
+    state: "complete",
+    policy,
+    status: {
+      crates: "complete",
+      tags: "complete",
+      pendingCrates: [],
+    },
+    packages: [{ state: "matching", subject: "example@1.2.3" }],
+    tags: [{ state: "matching", subject: "example-v1.2.3" }],
+  });
+
+  await import("./main.js");
+
+  await vi.waitFor(() =>
+    expect(mocks.setFailed).toHaveBeenCalledExactlyOnceWith(
+      `GitHub Release validation failed: ${githubReleaseError.message}`,
+    ),
+  );
+  expect(mocks.reconcile).toHaveBeenCalledOnce();
+  expect(mocks.setOutput).toHaveBeenCalledWith(
+    "report",
+    expect.stringContaining('"state":"complete"'),
+  );
+});
+
+test("succeeds when the release is already complete", async () => {
+  mocks.getInput.mockImplementation((name: string) =>
+    name === "phase" ? "all" : (defaultInputs[name] ?? ""),
+  );
+  mocks.reconcile.mockResolvedValueOnce({
+    state: "complete",
+    policy,
+    status: { crates: "complete", tags: "complete", pendingCrates: [] },
+    packages: [{ state: "matching", subject: "example@1.2.3" }],
+    tags: [{ state: "matching", subject: "example-v1.2.3" }],
+  });
+
+  await import("./main.js");
+
+  await vi.waitFor(() =>
+    expect(mocks.setOutput).toHaveBeenCalledWith(
+      "report",
+      expect.stringContaining('"state":"complete"'),
+    ),
+  );
+  expect(mocks.setFailed).not.toHaveBeenCalled();
+});
+
+test("fails a stopped run with the offending observations", async () => {
+  mocks.getInput.mockImplementation((name: string) =>
+    name === "phase" ? "finalize" : (defaultInputs[name] ?? ""),
+  );
+  mocks.reconcile.mockResolvedValueOnce({
+    state: "failed",
+    reason: "conflict",
+    retryable: false,
+    policy,
+    status: { crates: "conflict", tags: "complete", pendingCrates: [] },
+    packages: [
+      {
+        state: "conflicting",
+        subject: "example@1.2.3",
+        detail: "published from another commit",
+      },
+    ],
+    tags: [{ state: "matching", subject: "example-v1.2.3" }],
+  });
+
+  await import("./main.js");
+
+  await vi.waitFor(() =>
+    expect(mocks.setFailed).toHaveBeenCalledExactlyOnceWith(
+      "release reconciliation conflict: example@1.2.3: published from another commit",
+    ),
+  );
+});
+
+test("fails a publish phase that leaves crates pending", async () => {
+  mocks.getInput.mockImplementation((name: string) =>
+    name === "phase" ? "publish" : (defaultInputs[name] ?? ""),
+  );
+  mocks.reconcile.mockResolvedValueOnce({
+    state: "incomplete",
+    retryable: true,
+    policy: tagFirstPolicy,
+    status: {
+      crates: "incomplete",
+      tags: "complete",
+      pendingCrates: ["example@1.2.3"],
+    },
+    packages: [{ state: "missing", subject: "example@1.2.3" }],
+    tags: [{ state: "matching", subject: "example-v1.2.3" }],
+  });
+
+  await import("./main.js");
+
+  await vi.waitFor(() =>
+    expect(mocks.setFailed).toHaveBeenCalledExactlyOnceWith(
+      "release reconciliation incomplete: example@1.2.3: missing",
+    ),
+  );
+});
+
+test("fails a finalize phase the default policy stopped short", async () => {
+  mocks.getInput.mockImplementation((name: string) =>
+    name === "phase" ? "finalize" : (defaultInputs[name] ?? ""),
+  );
+  mocks.reconcile.mockResolvedValueOnce({
+    state: "incomplete",
+    retryable: true,
+    policy,
+    status: {
+      crates: "incomplete",
+      tags: "incomplete",
+      pendingCrates: ["example@1.2.3"],
+    },
+    packages: [{ state: "missing", subject: "example@1.2.3" }],
+    tags: [{ state: "missing", subject: "example-v1.2.3" }],
+  });
+
+  await import("./main.js");
+
+  await vi.waitFor(() =>
+    expect(mocks.setFailed).toHaveBeenCalledExactlyOnceWith(
+      "release reconciliation incomplete: example@1.2.3: missing; example-v1.2.3: missing",
+    ),
+  );
 });

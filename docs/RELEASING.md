@@ -47,4 +47,6 @@ matching rebuilt `dist/` (run `npm run build` locally before pushing).
 ## Version policy
 
 Use SemVer. Before v1.0.0, breaking changes to inputs, outputs, or the config
-schema bump the minor version and must be called out in the release notes.
+schema bump the minor version and must be called out in the release notes. A new
+optional config key, input, or output also bumps the minor version, because
+consumers gain behavior they can adopt.

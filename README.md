@@ -310,39 +310,96 @@ commit. The `finalize` phase then creates missing tags and the optional GitHub
 Release. A failed verification leaves a recoverable release with no public
 finalization state.
 
+## Finalize before crates are published
+
+Binaries, container images, and deployment workflows normally start from the
+GitHub Release event. A crates.io failure therefore withholds those operator
+artifacts, even when the approved commit is ready to ship. A repository can opt
+out of that ordering:
+
+```yaml
+finalize:
+  allowMissingCrates: true
+```
+
+With the policy enabled, `finalize` and `all` create the missing annotated tags
+and the optional GitHub Release while some planned crates are still absent from
+the registry. The remaining crates are reported as pending work rather than as
+success or failure:
+
+```json
+{
+  "state": "incomplete",
+  "retryable": true,
+  "policy": { "finalize": { "allowMissingCrates": true } },
+  "status": {
+    "crates": "incomplete",
+    "tags": "complete",
+    "githubRelease": "complete",
+    "pendingCrates": ["example-core@1.2.3"]
+  }
+}
+```
+
+The step succeeds, because every object this phase could create now exists. It
+fails when Cargo also reported an error, so a publication problem stays visible
+in the workflow run.
+
+Nothing else is relaxed. A crate archive built from another commit, a tag that
+points at another commit, and a GitHub Release with a conflicting channel or
+notes source remain hard failures in both modes.
+
+### Recovering the pending crates
+
+Rerun the release against the same base and target commits:
+
+1. `publish` or `all` publishes the crates that are still missing.
+2. `finalize` observes the existing tags and release and writes nothing.
+
+Both runs converge to `state: "complete"` with `crates: "complete"`. Tags are
+never moved and the GitHub Release is never recreated. A run that names a
+different target commit for the same versions still stops with a conflict,
+because the existing tags and crate archives contradict the new plan.
+
+`check` reports the policy in effect together with `pendingCrates`, so a dry run
+shows whether finalization would proceed and how many crates remain.
+
 ## Recovery behavior
 
 Each run submits a missing package set to Cargo at most once, then polls
 crates.io without resubmitting that set. A later workflow rerun observes what
 succeeded and derives the remaining package set from external state.
 
-| State         | Meaning                                                                    | Result                                                    |
-| ------------- | -------------------------------------------------------------------------- | --------------------------------------------------------- |
-| `matching`    | The object matches the target commit and release plan.                     | Keep it unchanged.                                        |
-| `missing`     | The object does not exist.                                                 | Create it in `publish`, `finalize`, or `all`.             |
-| `repairable`  | A GitHub Release has the correct tag but mutable metadata differs.         | Update its name, notes, draft state, or latest selection. |
-| `conflicting` | Existing immutable state points at another commit or contradicts the plan. | Stop before further writes.                               |
-| `transient`   | crates.io or GitHub could not be observed reliably.                        | Stop with a retryable report.                             |
+| State         | Meaning                                                                                                           | Result                                                    |
+| ------------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `matching`    | The object matches the target commit and release plan.                                                            | Keep it unchanged.                                        |
+| `missing`     | The object does not exist.                                                                                        | Create it in `publish`, `finalize`, or `all`.             |
+| `repairable`  | A GitHub Release has the correct tag but mutable metadata differs.                                                | Update its name, notes, draft state, or latest selection. |
+| `conflicting` | Existing immutable state points at another commit or contradicts the plan.                                        | Stop before further writes.                               |
+| `transient`   | crates.io or GitHub could not be observed reliably, or a tag or release this run created is still not observable. | Stop with a retryable report.                             |
 
 Finalization starts only after every planned crate version exists with the
-expected Cargo-recorded commit. The action creates tags next and the optional
-GitHub Release last, re-observing state after each mutation attempt to handle
-concurrent creation safely.
+expected Cargo-recorded commit, unless `finalize.allowMissingCrates` is enabled.
+A `finalize` or `all` run that reaches a missing crate under the default policy
+writes nothing, reports `state: "incomplete"`, and fails the step. The action
+creates tags next and the optional GitHub Release last, re-observing state after
+each mutation attempt to handle concurrent creation safely.
 
 ## Configuration reference
 
 Templates support `{name}` and `{version}`:
 
-| Field                                 | Required             | Default             | Purpose                                                     |
-| ------------------------------------- | -------------------- | ------------------- | ----------------------------------------------------------- |
-| `tagTemplate`                         | No                   | `{name}-v{version}` | Tag format for every selected package.                      |
-| `packageOverrides.<name>.tagTemplate` | No                   | Global tag template | Per-package tag format.                                     |
-| `githubRelease.package`               | For a GitHub Release |                     | Package whose version identifies the product release.       |
-| `githubRelease.nameTemplate`          | No                   | `{name} {version}`  | GitHub Release name.                                        |
-| `githubRelease.notesFile`             | For a GitHub Release |                     | Release notes file inside the target checkout.              |
-| `githubRelease.notesHeadingTemplate`  | No                   | Entire notes file   | Markdown heading prefix used to select one release section. |
-| `githubRelease.prerelease`            | No                   | Derived from semver | Override prerelease status.                                 |
-| `githubRelease.makeLatest`            | No                   | Highest stable      | `true`, `false`, or omitted for the highest stable version. |
+| Field                                 | Required             | Default             | Purpose                                                       |
+| ------------------------------------- | -------------------- | ------------------- | ------------------------------------------------------------- |
+| `tagTemplate`                         | No                   | `{name}-v{version}` | Tag format for every selected package.                        |
+| `packageOverrides.<name>.tagTemplate` | No                   | Global tag template | Per-package tag format.                                       |
+| `githubRelease.package`               | For a GitHub Release |                     | Package whose version identifies the product release.         |
+| `githubRelease.nameTemplate`          | No                   | `{name} {version}`  | GitHub Release name.                                          |
+| `githubRelease.notesFile`             | For a GitHub Release |                     | Release notes file inside the target checkout.                |
+| `githubRelease.notesHeadingTemplate`  | No                   | Entire notes file   | Markdown heading prefix used to select one release section.   |
+| `githubRelease.prerelease`            | No                   | Derived from semver | Override prerelease status.                                   |
+| `githubRelease.makeLatest`            | No                   | Highest stable      | `true`, `false`, or omitted for the highest stable version.   |
+| `finalize.allowMissingCrates`         | No                   | `false`             | Create tags and the GitHub Release before every crate exists. |
 
 `notesHeadingTemplate` must render a Markdown heading. It matches the heading
 prefix, so the source heading may append a link or date.
@@ -352,15 +409,16 @@ tags that match the package's tag template, and ignores drafts, prereleases,
 and the release's own tag. The release becomes the latest release only when its
 version carries no prerelease component and is greater than or equal to every
 version it read, so a patch for an older line never displaces a newer release
-and a rerun reaches the same selection. An explicit `true` or `false` is
-observed and reconciled the same way, while a prerelease cannot set
-`makeLatest` to `true`.
+and a rerun reaches the same selection. The selection reads at most 2,000
+published releases, and the run fails in a repository that has more. An explicit
+`true` or `false` is observed and reconciled the same way, while a prerelease
+cannot set `makeLatest` to `true`.
 
 ## Inputs and outputs
 
 | Input              | Required | Default                     | Description                                                |
 | ------------------ | -------- | --------------------------- | ---------------------------------------------------------- |
-| `phase`            | No       | `all`                       | `check`, `publish`, `finalize`, or `all`.                  |
+| `phase`            | No       | `all`                       | `observe`, `check`, `publish`, `finalize`, or `all`.       |
 | `source-directory` | No       | `.`                         | Cargo workspace within the target checkout.                |
 | `base-sha`         | Yes      |                             | Full commit SHA before the approved release change.        |
 | `target-sha`       | Yes      |                             | Full approved release commit SHA.                          |
@@ -371,20 +429,62 @@ observed and reconciled the same way, while a prerelease cannot set
 The `plan` output contains the deterministic release plan as JSON. The `report`
 output contains observations for the selected phase. A `complete` report from
 `publish` means crate publication is complete; tags and the GitHub Release can
-remain missing until `finalize` succeeds. A failed publication report includes
-`operationError` when Cargo returned an error.
+remain missing until `finalize` succeeds.
+
+The report `state` is one of three values:
+
+| `state`      | Meaning                                                                                           |
+| ------------ | ------------------------------------------------------------------------------------------------- |
+| `complete`   | Every planned crate, tag, and the optional GitHub Release exists and matches the target commit.   |
+| `incomplete` | The phase performed every write it was allowed to perform, and planned objects are still missing. |
+| `failed`     | The run stopped without finishing the phase.                                                      |
+
+An `incomplete` report sets `retryable: true` and carries `operationError` when
+Cargo returned an error. A `failed` report carries `reason: "conflict"` when
+immutable state contradicts the plan, or `reason: "transient"` when crates.io or
+GitHub could not be observed reliably. A conflict is not retryable; a transient
+failure is.
+
+Every report also carries `status` and `policy`. `status.crates`,
+`status.tags`, and `status.githubRelease` are `complete`, `incomplete`, or
+`conflict`; `status.githubRelease` appears only when `githubRelease` is
+configured. `status.pendingCrates` lists the planned crate versions the
+registry does not have yet. `policy` repeats the release policy in effect, in
+the shape of the config file.
+
+The step result follows from the state and the phase. A `complete` report
+succeeds and a `failed` report fails. An `incomplete` report fails whenever
+Cargo returned an error. Without a Cargo error it succeeds in `observe` and
+`check`, and in `finalize` and `all` when `finalize.allowMissingCrates` is
+enabled. Every other `incomplete` report fails and names the missing objects: a
+`publish` phase that did not finish, and `finalize` or `all` under the default
+policy.
 
 ## Phases
 
 | Phase      | Behavior                                                                     |
 | ---------- | ---------------------------------------------------------------------------- |
+| `observe`  | Report observed release state only, without Cargo packaging or writes.       |
 | `check`    | Observe release state and dry-run the complete Cargo plan without writes.    |
 | `publish`  | Preflight the complete plan, publish missing crates, then poll crates.io.    |
-| `finalize` | Require every crate, then reconcile tags and the optional GitHub Release.    |
+| `finalize` | Apply the crate requirement, then reconcile tags and the GitHub Release.     |
 | `all`      | Publish missing crates and continue to finalization after crates.io matches. |
 
+`observe` answers one question cheaply: has the release for this base and target
+pair fully published? It reads Cargo metadata to derive the plan, then reads
+crates.io, the repository tags, and the GitHub Release. It never packages,
+dry-runs, publishes, or writes, so a repository can run it on every push. Its
+report reaches `state: "complete"` only when every crate, tag, and the optional
+GitHub Release match the target commit.
+
+Unlike `check`, `observe` reports contradictions instead of failing on them. A
+crate published from another commit or a tag on another commit appears as
+`crates: "conflict"` or `tags: "conflict"` with the offending observation, and
+the step still succeeds. Invalid release notes remain a step failure, and the
+report is written before that failure.
+
 `check` exits successfully when desired state is incomplete because that is the
-normal pre-release condition. Its JSON report uses `reason: "incomplete"` to
+normal pre-release condition. Its JSON report uses `state: "incomplete"` to
 describe missing objects. Contradictions, transient observation failures, and
 Cargo dry-run failures still fail the step.
 

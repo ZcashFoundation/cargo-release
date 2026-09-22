@@ -3,15 +3,17 @@ import type {
   GithubRelease,
   ReleasePackage,
   ReleasePlan,
+  ReleasePolicy,
 } from "./release-plan.js";
 
 export type {
   GithubRelease,
   ReleasePackage,
   ReleasePlan,
+  ReleasePolicy,
 } from "./release-plan.js";
 
-export type Phase = "check" | "publish" | "finalize" | "all";
+export type Phase = "observe" | "check" | "publish" | "finalize" | "all";
 
 type StableObservation = Readonly<{
   state: "matching" | "missing";
@@ -42,104 +44,182 @@ export interface ReconcilePorts {
 
 export interface ReconcileOptions {
   attempts: number;
+  policy?: ReleasePolicy;
 }
 
-export interface CompleteReport {
+export type ComponentStatus = "complete" | "incomplete" | "conflict";
+
+export interface ReleaseStatus {
+  readonly crates: ComponentStatus;
+  readonly tags: ComponentStatus;
+  readonly githubRelease?: ComponentStatus;
+  readonly pendingCrates: readonly string[];
+}
+
+interface ReportBase {
+  readonly status: ReleaseStatus;
+  readonly policy: ReleasePolicy;
+  readonly packages: readonly Observation[];
+  readonly tags: readonly Observation[];
+  readonly githubRelease?: Observation;
+}
+
+export interface CompleteReport extends ReportBase {
   readonly state: "complete";
-  readonly packages: readonly Observation[];
-  readonly tags: readonly Observation[];
-  readonly githubRelease?: Observation;
 }
 
-interface FailedReportBase {
+export interface IncompleteReport extends ReportBase {
+  readonly state: "incomplete";
+  readonly retryable: true;
+  readonly operationError?: string;
+}
+
+interface FailedReportBase extends ReportBase {
   readonly state: "failed";
-  readonly packages: readonly Observation[];
-  readonly tags: readonly Observation[];
-  readonly githubRelease?: Observation;
+  readonly operationError?: never;
 }
 
 interface ConflictReport extends FailedReportBase {
   readonly reason: "conflict";
   readonly retryable: false;
-  readonly operationError?: never;
 }
 
 interface TransientReport extends FailedReportBase {
   readonly reason: "transient";
   readonly retryable: true;
-  readonly operationError?: never;
 }
 
-interface IncompleteReport extends FailedReportBase {
-  readonly reason: "incomplete";
-  readonly retryable: true;
-  readonly operationError?: string;
-}
-
-export type FailedReport = ConflictReport | TransientReport | IncompleteReport;
-export type ReconcileReport = CompleteReport | FailedReport;
+export type FailedReport = ConflictReport | TransientReport;
+export type ReconcileReport = CompleteReport | IncompleteReport | FailedReport;
 
 interface ObservedReleaseState {
-  packages: Observation[];
-  tags: Observation[];
+  packages: readonly Observation[];
+  tags: readonly Observation[];
   githubRelease?: Observation;
 }
 
+interface FinalizationInput {
+  readonly refreshObservations: boolean;
+  readonly publicationError?: string;
+}
+
+const DEFAULT_POLICY: ReleasePolicy = {
+  finalize: { allowMissingCrates: false },
+};
+
 type PublicationResult =
-  | { state: "published"; packages: Observation[] }
+  | { state: "published"; packages: readonly Observation[] }
+  | {
+      state: "pending";
+      packages: readonly Observation[];
+      operationError: string | undefined;
+    }
   | { state: "failed"; report: FailedReport };
 
 type TagFinalizationResult =
-  | { state: "complete"; tags: Observation[]; attempted: boolean }
+  | { state: "complete"; tags: readonly Observation[]; attempted: boolean }
   | { state: "failed"; report: FailedReport };
 
-function complete(state: ObservedReleaseState): CompleteReport {
-  return state.githubRelease
-    ? {
-        state: "complete",
-        packages: state.packages,
-        tags: state.tags,
-        githubRelease: state.githubRelease,
-      }
-    : { state: "complete", packages: state.packages, tags: state.tags };
+type ReleaseFinalizationResult =
+  | { state: "complete"; githubRelease: Observation }
+  | { state: "failed"; report: FailedReport };
+
+function componentStatus(
+  observations: readonly Observation[],
+): ComponentStatus {
+  if (contains(observations, "conflicting")) return "conflict";
+  return observations.every((observation) => observation.state === "matching")
+    ? "complete"
+    : "incomplete";
 }
 
-function reportFields(state: ObservedReleaseState): FailedReportBase {
+function allObservations(state: ObservedReleaseState): readonly Observation[] {
+  return state.githubRelease === undefined
+    ? [...state.packages, ...state.tags]
+    : [...state.packages, ...state.tags, state.githubRelease];
+}
+
+function releaseStatus(state: ObservedReleaseState): ReleaseStatus {
+  const crates = componentStatus(state.packages);
+  const tags = componentStatus(state.tags);
+  const pendingCrates = state.packages
+    .filter((observation) => observation.state === "missing")
+    .map((observation) => observation.subject);
+  return state.githubRelease === undefined
+    ? { crates, tags, pendingCrates }
+    : {
+        crates,
+        tags,
+        githubRelease: componentStatus([state.githubRelease]),
+        pendingCrates,
+      };
+}
+
+function reportBase(
+  state: ObservedReleaseState,
+  policy: ReleasePolicy,
+): ReportBase {
+  const fields = {
+    status: releaseStatus(state),
+    policy,
+    packages: state.packages,
+    tags: state.tags,
+  };
   return state.githubRelease
-    ? {
-        state: "failed",
-        packages: state.packages,
-        tags: state.tags,
-        githubRelease: state.githubRelease,
-      }
-    : { state: "failed", packages: state.packages, tags: state.tags };
+    ? { ...fields, githubRelease: state.githubRelease }
+    : fields;
+}
+
+function complete(
+  state: ObservedReleaseState,
+  policy: ReleasePolicy,
+): CompleteReport {
+  return { state: "complete", ...reportBase(state, policy) };
+}
+
+function incomplete(
+  state: ObservedReleaseState,
+  policy: ReleasePolicy,
+  operationError?: string,
+): IncompleteReport {
+  const report = {
+    state: "incomplete" as const,
+    retryable: true as const,
+    ...reportBase(state, policy),
+  };
+  return operationError === undefined ? report : { ...report, operationError };
+}
+
+function observed(
+  state: ObservedReleaseState,
+  policy: ReleasePolicy,
+): ReconcileReport {
+  return allObservations(state).every(
+    (observation) => observation.state === "matching",
+  )
+    ? complete(state, policy)
+    : incomplete(state, policy);
+}
+
+function settle(
+  state: ObservedReleaseState,
+  policy: ReleasePolicy,
+  operationError?: string,
+): ReconcileReport {
+  return state.packages.every((observation) => observation.state === "matching")
+    ? complete(state, policy)
+    : incomplete(state, policy, operationError);
 }
 
 function failure(
   reason: FailedReport["reason"],
   state: ObservedReleaseState,
+  policy: ReleasePolicy,
 ): FailedReport {
-  const fields = reportFields(state);
-  switch (reason) {
-    case "conflict":
-      return { ...fields, reason, retryable: false };
-    case "transient":
-      return { ...fields, reason, retryable: true };
-    case "incomplete":
-      return { ...fields, reason, retryable: true };
-  }
-}
-
-function incompleteFailure(
-  state: ObservedReleaseState,
-  operationError?: string,
-): IncompleteReport {
-  const report = {
-    ...reportFields(state),
-    reason: "incomplete" as const,
-    retryable: true as const,
-  };
-  return operationError === undefined ? report : { ...report, operationError };
+  const fields = { state: "failed" as const, ...reportBase(state, policy) };
+  return reason === "conflict"
+    ? { ...fields, reason, retryable: false }
+    : { ...fields, reason, retryable: true };
 }
 
 function contains(
@@ -162,19 +242,21 @@ function missingPackages(
 
 function inspectionFailure(
   state: ObservedReleaseState,
+  policy: ReleasePolicy,
 ): FailedReport | undefined {
-  const observations =
-    state.githubRelease === undefined
-      ? [...state.packages, ...state.tags]
-      : [...state.packages, ...state.tags, state.githubRelease];
+  const observations = allObservations(state);
 
-  if (contains(observations, "conflicting")) return failure("conflict", state);
-  if (contains(observations, "transient")) return failure("transient", state);
+  if (contains(observations, "conflicting")) {
+    return failure("conflict", state, policy);
+  }
+  if (contains(observations, "transient")) {
+    return failure("transient", state, policy);
+  }
   if (
     contains(state.packages, "repairable") ||
     contains(state.tags, "repairable")
   ) {
-    return failure("conflict", state);
+    return failure("conflict", state, policy);
   }
   return undefined;
 }
@@ -217,28 +299,11 @@ async function observeDesiredState(
     : { packages, tags, githubRelease };
 }
 
-async function checkRelease(
-  plan: ReleasePlan,
-  ports: ReconcilePorts,
-  state: ObservedReleaseState,
-): Promise<ReconcileReport> {
-  await ports.dryRunPackages(plan.packages);
-
-  if (
-    contains(state.packages, "missing") ||
-    contains(state.tags, "missing") ||
-    (state.githubRelease !== undefined &&
-      state.githubRelease.state !== "matching")
-  ) {
-    return failure("incomplete", state);
-  }
-  return complete(state);
-}
-
 async function publishMissingPackages(
   plan: ReleasePlan,
   ports: ReconcilePorts,
   state: ObservedReleaseState,
+  policy: ReleasePolicy,
   attempts: number,
 ): Promise<PublicationResult> {
   await ports.dryRunPackages(plan.packages);
@@ -257,19 +322,19 @@ async function publishMissingPackages(
     const observed = { ...state, packages };
 
     if (contains(packages, "conflicting")) {
-      return { state: "failed", report: failure("conflict", observed) };
+      return { state: "failed", report: failure("conflict", observed, policy) };
     }
     if (packages.every((observation) => observation.state === "matching")) {
       return { state: "published", packages };
     }
     if (attempt === maximumAttempts - 1) {
       if (contains(packages, "transient")) {
-        return { state: "failed", report: failure("transient", observed) };
+        return {
+          state: "failed",
+          report: failure("transient", observed, policy),
+        };
       }
-      return {
-        state: "failed",
-        report: incompleteFailure(observed, publicationError),
-      };
+      return { state: "pending", packages, operationError: publicationError };
     }
   }
 
@@ -280,6 +345,7 @@ async function finalizeMissingTags(
   plan: ReleasePlan,
   ports: ReconcilePorts,
   state: ObservedReleaseState,
+  policy: ReleasePolicy,
 ): Promise<TagFinalizationResult> {
   const tags = [...state.tags];
   const missingTagIndexes = plan.packages.flatMap((_, index) =>
@@ -298,7 +364,7 @@ async function finalizeMissingTags(
 
     tags[index] = await ports.observeTag(item);
     const observed = { ...state, tags };
-    const afterTagFailure = inspectionFailure(observed);
+    const afterTagFailure = inspectionFailure(observed, policy);
     if (afterTagFailure) {
       return { state: "failed", report: afterTagFailure };
     }
@@ -306,7 +372,7 @@ async function finalizeMissingTags(
       if (tagCreationError !== undefined) throw tagCreationError;
       return {
         state: "failed",
-        report: failure("incomplete", observed),
+        report: failure("transient", observed, policy),
       };
     }
   }
@@ -322,12 +388,13 @@ async function finalizeGithubRelease(
   release: GithubRelease,
   ports: ReconcilePorts,
   state: ObservedReleaseState & { githubRelease: Observation },
-): Promise<ReconcileReport> {
+  policy: ReleasePolicy,
+): Promise<ReleaseFinalizationResult> {
   if (
     state.githubRelease.state !== "missing" &&
     state.githubRelease.state !== "repairable"
   ) {
-    return complete(state);
+    return { state: "complete", githubRelease: state.githubRelease };
   }
 
   let releaseMutationError: Error | undefined;
@@ -343,56 +410,73 @@ async function finalizeGithubRelease(
 
   const githubRelease = await ports.observeGithubRelease(release);
   const observed = { ...state, githubRelease };
-  const afterReleaseFailure = inspectionFailure(observed);
-  if (afterReleaseFailure) return afterReleaseFailure;
+  const afterReleaseFailure = inspectionFailure(observed, policy);
+  if (afterReleaseFailure) {
+    return { state: "failed", report: afterReleaseFailure };
+  }
   if (githubRelease.state !== "matching") {
     if (releaseMutationError !== undefined) throw releaseMutationError;
-    return failure("incomplete", observed);
+    return {
+      state: "failed",
+      report: failure("transient", observed, policy),
+    };
   }
-  return complete(observed);
+  return { state: "complete", githubRelease };
 }
 
 async function finalizeRelease(
   plan: ReleasePlan,
   ports: ReconcilePorts,
   initialState: ObservedReleaseState,
-  refreshBeforeFinalization: boolean,
+  policy: ReleasePolicy,
+  input: FinalizationInput,
 ): Promise<ReconcileReport> {
   let state = initialState;
-  if (refreshBeforeFinalization) {
+  if (input.refreshObservations) {
     const tags = await observeTags(plan, ports);
     const githubRelease = await observeGithubRelease(plan, ports);
     state =
       githubRelease === undefined
         ? { ...state, tags }
         : { ...state, tags, githubRelease };
-    const finalizationFailure = inspectionFailure(state);
+    const finalizationFailure = inspectionFailure(state, policy);
     if (finalizationFailure) return finalizationFailure;
   }
 
-  if (missingPackages(plan, state.packages).length > 0) {
-    return failure("incomplete", state);
+  if (
+    !policy.finalize.allowMissingCrates &&
+    missingPackages(plan, state.packages).length > 0
+  ) {
+    return incomplete(state, policy);
   }
 
-  const tagResult = await finalizeMissingTags(plan, ports, state);
+  const tagResult = await finalizeMissingTags(plan, ports, state, policy);
   if (tagResult.state === "failed") return tagResult.report;
   state = { ...state, tags: tagResult.tags };
 
   if (tagResult.attempted) {
     const githubRelease = await observeGithubRelease(plan, ports);
     state = githubRelease === undefined ? state : { ...state, githubRelease };
-    const releaseRaceFailure = inspectionFailure(state);
+    const releaseRaceFailure = inspectionFailure(state, policy);
     if (releaseRaceFailure) return releaseRaceFailure;
   }
 
-  if (!plan.githubRelease) return complete(state);
+  if (!plan.githubRelease) return settle(state, policy, input.publicationError);
   if (state.githubRelease === undefined) {
     throw new Error("configured GitHub Release was not observed");
   }
-  return finalizeGithubRelease(plan.githubRelease, ports, {
-    ...state,
-    githubRelease: state.githubRelease,
-  });
+  const releaseResult = await finalizeGithubRelease(
+    plan.githubRelease,
+    ports,
+    { ...state, githubRelease: state.githubRelease },
+    policy,
+  );
+  if (releaseResult.state === "failed") return releaseResult.report;
+  return settle(
+    { ...state, githubRelease: releaseResult.githubRelease },
+    policy,
+    input.publicationError,
+  );
 }
 
 export async function reconcile(
@@ -401,13 +485,20 @@ export async function reconcile(
   ports: ReconcilePorts,
   options: ReconcileOptions,
 ): Promise<ReconcileReport> {
+  const policy = options.policy ?? DEFAULT_POLICY;
   let state = await observeDesiredState(plan, ports);
-  const preflightFailure = inspectionFailure(state);
+  if (phase === "observe") return observed(state, policy);
+
+  const preflightFailure = inspectionFailure(state, policy);
   if (preflightFailure) return preflightFailure;
 
-  if (phase === "check") return checkRelease(plan, ports, state);
+  if (phase === "check") {
+    await ports.dryRunPackages(plan.packages);
+    return observed(state, policy);
+  }
 
   let attemptedPublication = false;
+  let publicationError: string | undefined;
   if (
     (phase === "publish" || phase === "all") &&
     missingPackages(plan, state.packages).length > 0
@@ -417,14 +508,24 @@ export async function reconcile(
       plan,
       ports,
       state,
+      policy,
       options.attempts,
     );
     if (publication.state === "failed") return publication.report;
     state = { ...state, packages: publication.packages };
+    if (publication.state === "pending") {
+      if (phase === "publish" || !policy.finalize.allowMissingCrates) {
+        return incomplete(state, policy, publication.operationError);
+      }
+      publicationError = publication.operationError;
+    }
   } else if (phase === "publish" || phase === "all") {
     await ports.dryRunPackages(plan.packages);
   }
 
-  if (phase === "publish") return complete(state);
-  return finalizeRelease(plan, ports, state, attemptedPublication);
+  if (phase === "publish") return complete(state, policy);
+  return finalizeRelease(plan, ports, state, policy, {
+    refreshObservations: attemptedPublication,
+    ...(publicationError === undefined ? {} : { publicationError }),
+  });
 }

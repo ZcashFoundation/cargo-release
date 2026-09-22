@@ -29,10 +29,19 @@ export interface GithubReleaseConfig {
   readonly makeLatest?: "true" | "false";
 }
 
+export interface FinalizeConfig {
+  readonly allowMissingCrates?: boolean;
+}
+
 export interface ReleasePlanConfig {
   readonly tagTemplate?: string;
   readonly packageOverrides?: Readonly<Record<string, PackageOverride>>;
   readonly githubRelease?: GithubReleaseConfig;
+  readonly finalize?: FinalizeConfig;
+}
+
+export interface ReleasePolicy {
+  readonly finalize: Required<FinalizeConfig>;
 }
 
 export interface ReleasePackage {

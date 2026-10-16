@@ -111,9 +111,25 @@ jobs:
             notesHeadingTemplate: "## Release {version}"
           EOF
 
+      # The action clones the source repository into os.tmpdir(). Point that at
+      # a tmpfs so the clone always crosses filesystems, as it does on runners
+      # where /tmp is not on the checkout's disk.
+      - name: Use a temp directory on another filesystem
+        shell: bash
+        run: |
+          set -euo pipefail
+          temp_directory="$(mktemp -d /dev/shm/cargo-release-hosted-smoke.XXXXXX)"
+          if [ "$(stat -c %d "${temp_directory}")" = "$(stat -c %d "${SOURCE_DIRECTORY}")" ]; then
+            echo "${temp_directory} and ${SOURCE_DIRECTORY} must be on different filesystems"
+            exit 1
+          fi
+          printf 'CROSS_DEVICE_TMPDIR=%s\n' "${temp_directory}" >> "${GITHUB_ENV}"
+
       - name: Run the committed action in check mode
         id: release
         uses: ./
+        env:
+          TMPDIR: ${{ env.CROSS_DEVICE_TMPDIR }}
         with:
           phase: check
           source-directory: ${{ env.SOURCE_DIRECTORY }}

@@ -202,7 +202,7 @@ describe("loadReleasePlan", () => {
         ok(JSON.stringify(targetMetadata)),
       ],
       [
-        "git clone --no-checkout --local /repo /tmp/reconcile/base/repository @ /repo",
+        "git clone --no-checkout --shared /repo /tmp/reconcile/base/repository @ /repo",
         ok(""),
       ],
       [
@@ -282,7 +282,7 @@ describe("loadReleasePlan", () => {
         ok(JSON.stringify(targetMetadata)),
       ],
       [
-        "git clone --no-checkout --local /repo /tmp/reconcile/base/repository @ /repo",
+        "git clone --no-checkout --shared /repo /tmp/reconcile/base/repository @ /repo",
         ok(""),
       ],
       [
@@ -483,7 +483,7 @@ describe("loadReleasePlan", () => {
         ok(JSON.stringify(targetMetadata)),
       ],
       [
-        "git clone --no-checkout --local /repo /tmp/reconcile/base/repository @ /repo",
+        "git clone --no-checkout --shared /repo /tmp/reconcile/base/repository @ /repo",
         ok(""),
       ],
       [

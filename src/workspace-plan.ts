@@ -145,10 +145,13 @@ export async function loadReleasePlan(
   const baseRepository = path.join(temporaryDirectory, "repository");
   let baseMetadata: CargoMetadataSnapshot;
   try {
+    // --shared reads objects from the source repository instead of hard-linking
+    // them, so it works when the temp directory is on another filesystem. The
+    // clone is removed below, before the source can prune objects it needs.
     await requiredRun(
       ports,
       "git",
-      ["clone", "--no-checkout", "--local", repository, baseRepository],
+      ["clone", "--no-checkout", "--shared", repository, baseRepository],
       repository,
     );
     await requiredRun(
